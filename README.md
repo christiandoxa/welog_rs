@@ -1,4 +1,4 @@
-# welog_rs [![CI](https://github.com/christiandoxa/welog_rs/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/christiandoxa/welog_rs/actions/workflows/ci.yml)
+# welog_rs [![Rust Test](https://github.com/christiandoxa/welog_rs/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/christiandoxa/welog_rs/actions/workflows/ci.yml)
 
 Rust port of the Go `welog` library. Provides structured logging to Elasticsearch with a file fallback plus Axum
 middleware that logs requests/responses and target (HTTP client) calls.
