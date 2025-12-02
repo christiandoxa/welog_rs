@@ -1,0 +1,13 @@
+# Rust build artifacts
+/target/
+
+# Logs
+logs.txt
+
+# Editor/IDE files
+.idea/
+*.iml
+.vscode/
+
+# Misc backups
+*.rs.bk
