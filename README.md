@@ -27,6 +27,17 @@ If any are missing/empty, logs are written to `logs.txt` in the working director
 
 ### Add the dependency
 
+Add directly from this repo:
+
+```toml
+[dependencies]
+welog_rs = { git = "https://github.com/christiandoxa/welog_rs.git" }
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["macros", "json"] }
+```
+
+Or if you vendored the crate locally:
+
 ```toml
 [dependencies]
 welog_rs = { path = "." } # or use your crate source path
