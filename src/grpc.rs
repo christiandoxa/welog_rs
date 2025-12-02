@@ -262,6 +262,7 @@ fn serialize_message<T: Serialize>(msg: &T) -> (LogFields, String) {
     (fields, string_repr)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn log_grpc_unary(
     ctx: &GrpcContext,
     method: &str,
@@ -327,6 +328,7 @@ fn log_grpc_unary(
     ctx.logger.log(fields);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn log_grpc_stream(
     ctx: &GrpcContext,
     method: &str,
@@ -442,10 +444,10 @@ fn grpc_method<T>(request: &Request<T>) -> String {
 }
 
 fn peer_address(extensions: &Extensions) -> String {
-    if let Some(info) = extensions.get::<TcpConnectInfo>() {
-        if let Some(addr) = info.remote_addr() {
-            return addr.to_string();
-        }
+    if let Some(info) = extensions.get::<TcpConnectInfo>()
+        && let Some(addr) = info.remote_addr()
+    {
+        return addr.to_string();
     }
 
     String::new()
@@ -453,22 +455,20 @@ fn peer_address(extensions: &Extensions) -> String {
 
 fn fetch_request_id(md: &MetadataMap) -> String {
     let request_id_key = request_id_metadata_key();
-    if let Some(val) = md.get(&request_id_key).and_then(|v| v.to_str().ok()) {
-        if !val.is_empty() {
-            return val.to_string();
-        }
+    if let Some(val) = md.get(&request_id_key).and_then(|v| v.to_str().ok())
+        && !val.is_empty()
+    {
+        return val.to_string();
     }
 
     if let Ok(alt_key) = MetadataKey::<Ascii>::from_bytes(
         generalkey::REQUEST_ID_HEADER
             .to_ascii_lowercase()
             .as_bytes(),
-    ) {
-        if let Some(val) = md.get(&alt_key).and_then(|v| v.to_str().ok()) {
-            if !val.is_empty() {
-                return val.to_string();
-            }
-        }
+    ) && let Some(val) = md.get(&alt_key).and_then(|v| v.to_str().ok())
+        && !val.is_empty()
+    {
+        return val.to_string();
     }
 
     String::new()

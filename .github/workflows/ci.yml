@@ -17,6 +17,7 @@ jobs:
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
       - name: Cache cargo builds
@@ -40,6 +41,7 @@ jobs:
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: stable
           components: llvm-tools-preview
 
       - name: Cache cargo builds
