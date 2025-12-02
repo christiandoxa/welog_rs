@@ -15,6 +15,10 @@ use tower::{Layer, Service, ServiceExt};
 use crate::axum_middleware::{
     WelogContext, extract_client_ip, header_to_string, log_axum, log_axum_client, version_to_string,
 };
+use crate::grpc::{
+    GrpcContext, WelogGrpcInterceptor, log_grpc_client, with_grpc_stream_logging,
+    with_grpc_unary_logging,
+};
 use crate::logger::{
     run_worker_with_path, test_build_fallback_bytes, test_logger_with_sender,
     test_send_to_elastic_without_config, test_trim_oldest_lines, test_write_fallback,
@@ -22,6 +26,20 @@ use crate::logger::{
 use crate::model::{TargetRequest, TargetResponse};
 use crate::util::{LogFields, build_target_log_fields, header_to_map};
 use crate::{Config, set_config};
+use serde::Serialize;
+use tonic::metadata::MetadataValue;
+use tonic::service::Interceptor;
+use tonic::{GrpcMethod, Request, Response};
+
+#[derive(Serialize)]
+struct DemoReq {
+    message: String,
+}
+
+#[derive(Serialize)]
+struct DemoRes {
+    message: String,
+}
 
 #[test]
 fn header_to_map_converts_values_to_strings() {
@@ -392,7 +410,7 @@ fn write_fallback_persists_line() {
 
     test_write_fallback(tmp.path(), &fields, Some("boom")).unwrap();
 
-    let contents = std::fs::read_to_string(tmp.path()).unwrap();
+    let contents = fs::read_to_string(tmp.path()).unwrap();
     assert!(contents.contains("\"message\":\"ok\""));
     assert!(contents.contains("\"hook_error\":\"boom\""));
     assert!(contents.ends_with('\n'));
@@ -420,7 +438,7 @@ fn set_config_sets_env_vars() {
 
 #[tokio::test]
 async fn welog_middleware_wraps_request_and_sets_request_id() {
-    let inner = tower::service_fn(|req: axum::http::Request<Body>| async move {
+    let inner = tower::service_fn(|req: http::Request<Body>| async move {
         assert_eq!(req.method(), Method::POST);
         assert_eq!(req.uri(), &Uri::from_static("/demo"));
         let req_id = req
@@ -435,7 +453,7 @@ async fn welog_middleware_wraps_request_and_sets_request_id() {
             .expect("context should be set");
         assert!(!ctx.request_id().is_empty());
         Ok::<_, std::convert::Infallible>(
-            axum::http::Response::builder()
+            http::Response::builder()
                 .status(StatusCode::CREATED)
                 .body(Body::from(r#"{"ok":true}"#))
                 .unwrap(),
@@ -444,7 +462,7 @@ async fn welog_middleware_wraps_request_and_sets_request_id() {
 
     let mut svc = crate::axum_middleware::WelogLayer.layer(inner);
 
-    let req = axum::http::Request::builder()
+    let req = http::Request::builder()
         .method(Method::POST)
         .uri("/demo")
         .header("content-type", "application/json")
@@ -482,4 +500,175 @@ fn worker_loop_writes_fallback_on_error() {
 
     let contents = fs::read_to_string(tmp.path()).unwrap();
     assert!(contents.contains("\"msg\":\"hello\""));
+}
+
+#[test]
+fn grpc_interceptor_injects_request_id_and_context() {
+    let mut interceptor = WelogGrpcInterceptor;
+    let mut req: Request<()> = Request::new(());
+    req.metadata_mut()
+        .insert("user-agent", MetadataValue::from_static("unit-test"));
+
+    let req = interceptor.call(req).expect("interceptor should succeed");
+
+    let ctx = req
+        .extensions()
+        .get::<Arc<GrpcContext>>()
+        .cloned()
+        .expect("context should be inserted");
+
+    let request_id = ctx.request_id();
+    assert!(!request_id.is_empty());
+
+    let header_val = req
+        .metadata()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap();
+    assert_eq!(header_val, request_id);
+}
+
+#[tokio::test]
+async fn with_grpc_unary_logging_logs_payload_and_target() {
+    let (sender, receiver) = channel();
+    let logger = Arc::new(test_logger_with_sender(sender));
+    let ctx = Arc::new(GrpcContext {
+        request_id: "grpc-test-id".into(),
+        logger,
+        client_log: Arc::new(Mutex::new(Vec::new())),
+    });
+
+    let mut req = Request::new(DemoReq {
+        message: "hi".into(),
+    });
+    req.metadata_mut()
+        .insert("x-request-id", MetadataValue::from_static("grpc-test-id"));
+    req.metadata_mut()
+        .insert("user-agent", MetadataValue::from_static("unit-test"));
+    req.extensions_mut().insert(ctx.clone());
+    req.extensions_mut()
+        .insert(GrpcMethod::new("test.Service", "Say"));
+
+    let response = with_grpc_unary_logging(req, |req| async move {
+        let ctx = req
+            .extensions()
+            .get::<Arc<GrpcContext>>()
+            .cloned()
+            .expect("ctx");
+
+        log_grpc_client(
+            &ctx,
+            TargetRequest {
+                url: "https://example.com".into(),
+                method: "GET".into(),
+                content_type: "application/json".into(),
+                header: Default::default(),
+                body: br#"{"ping":"pong"}"#.to_vec(),
+                timestamp: Utc::now(),
+            },
+            TargetResponse {
+                header: Default::default(),
+                body: br#"{"ok":true}"#.to_vec(),
+                status: 200,
+                latency: Duration::from_millis(10),
+            },
+        );
+
+        Ok(Response::new(DemoRes {
+            message: format!("hello {}", req.get_ref().message),
+        }))
+    })
+    .await
+    .unwrap();
+
+    let req_id_from_resp = response
+        .metadata()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap();
+    assert_eq!(req_id_from_resp, "grpc-test-id");
+
+    let fields = receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("log should be sent");
+
+    assert_eq!(
+        fields.get("grpcMethod"),
+        Some(&serde_json::Value::String("/test.Service/Say".into()))
+    );
+    assert_eq!(
+        fields.get("grpcStatusCode"),
+        Some(&serde_json::Value::String("OK".into()))
+    );
+    assert_eq!(
+        fields.get("requestId"),
+        Some(&serde_json::Value::String("grpc-test-id".into()))
+    );
+
+    let target = fields
+        .get("target")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap();
+    assert_eq!(target.len(), 1);
+}
+
+#[tokio::test]
+async fn with_grpc_stream_logging_logs_flags() {
+    let (sender, receiver) = channel();
+    let logger = Arc::new(test_logger_with_sender(sender));
+    let ctx = Arc::new(GrpcContext {
+        request_id: "stream-id".into(),
+        logger,
+        client_log: Arc::new(Mutex::new(Vec::new())),
+    });
+
+    let mut req = Request::new(DemoReq {
+        message: "hi".into(),
+    });
+    req.metadata_mut()
+        .insert("x-request-id", MetadataValue::from_static("stream-id"));
+    req.extensions_mut().insert(ctx.clone());
+    req.extensions_mut()
+        .insert(GrpcMethod::new("test.Service", "Bidi"));
+
+    let response = with_grpc_stream_logging(
+        req,
+        |req| async move {
+            assert_eq!(req.get_ref().message, "hi");
+            Ok(Response::new(()))
+        },
+        true,
+        true,
+    )
+    .await
+    .unwrap();
+
+    let req_id_from_resp = response
+        .metadata()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap();
+    assert_eq!(req_id_from_resp, "stream-id");
+
+    let fields = receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("log should be sent");
+
+    assert_eq!(
+        fields.get("grpcMethod"),
+        Some(&serde_json::Value::String("/test.Service/Bidi".into()))
+    );
+    assert_eq!(
+        fields.get("grpcStatusCode"),
+        Some(&serde_json::Value::String("OK".into()))
+    );
+    assert_eq!(
+        fields.get("grpcIsClientStream"),
+        Some(&serde_json::Value::Bool(true))
+    );
+    assert_eq!(
+        fields.get("grpcIsServerStream"),
+        Some(&serde_json::Value::Bool(true))
+    );
 }

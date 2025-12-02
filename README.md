@@ -10,6 +10,8 @@ middleware that logs requests/responses and target (HTTP client) calls.
 - Axum middleware (`WelogLayer`) that captures request/response payloads, headers, latency, client IP, and attaches a
   request ID.
 - Helper to record outbound/target HTTP calls (`log_axum_client`) and include them in the same log entry.
+- Tonic gRPC helpers: interceptor + unary/stream wrappers + `log_grpc_client` (mirrors the Go `NewGRPCUnary` /
+  `NewGRPCStream`).
 - Environment-based configuration to match the Go library’s behavior.
 
 ## Environment variables
@@ -34,6 +36,8 @@ Add directly from this repo:
 welog_rs = { git = "https://github.com/christiandoxa/welog_rs.git" }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["macros", "json"] }
+# only for gRPC
+tonic = { version = "0.12", features = ["transport"] }
 ```
 
 Or if you vendored the crate locally:
@@ -111,6 +115,62 @@ async fn test_target_handler(Extension(ctx): Extension<Arc<WelogContext>>) -> Js
 - On error or missing config, logs are appended to `logs.txt`, trimming the oldest lines when the file would exceed 1GB.
 - Request IDs are preserved from the `X-Request-ID` header or generated if missing; the value is added back to the
   response headers.
+
+### gRPC (tonic)
+
+`welog_rs` now mirrors the Go gRPC interceptors via Tonic helpers:
+
+- `WelogGrpcInterceptor` injects request ID + logger + client log into request extensions.
+- `with_grpc_unary_logging` wraps unary handlers and emits the same fields as `logGRPCUnary` in Go.
+- `with_grpc_stream_logging` wraps streaming handlers (logs when the handler future completes) and mirrors
+  `logGRPCStream`.
+- `log_grpc_client` appends outbound/target logs to the current context.
+
+Example:
+
+```rust
+use std::sync::Arc;
+use tonic::{Request, Response, Status};
+use welog_rs::{GrpcContext, WelogGrpcInterceptor, log_grpc_client, with_grpc_stream_logging, with_grpc_unary_logging};
+use welog_rs::model::{TargetRequest, TargetResponse};
+
+#[derive(serde::Serialize, Default)]
+struct HelloRequest {
+    name: String
+}
+
+#[derive(serde::Serialize, Default)]
+struct HelloReply {
+    message: String
+}
+
+// Attach on the server builder: MyServiceServer::with_interceptor(my_impl, WelogGrpcInterceptor)
+
+async fn say_hello(request: Request<HelloRequest>) -> Result<Response<HelloReply>, Status> {
+    with_grpc_unary_logging(request, |req| async move {
+        let ctx: Arc<GrpcContext> = req.extensions().get::<Arc<GrpcContext>>()?.clone();
+
+        // Record an outbound HTTP/gRPC call (optional)
+        log_grpc_client(&ctx, TargetRequest {
+            url: "https://example.com".into(),
+            method: "GET".into(),
+            content_type: "application/json".into(),
+            header: Default::default(),
+            body: b"{}".to_vec(),
+            timestamp: chrono::Utc::now(),
+        }, TargetResponse {
+            header: Default::default(),
+            body: b"{}".to_vec(),
+            status: 200,
+            latency: std::time::Duration::from_millis(20),
+        });
+
+        Ok(Response::new(HelloReply { message: "hello".into() }))
+    }).await
+}
+
+// For streaming handlers, call with_grpc_stream_logging(request, handler, is_client_stream, is_server_stream).
+```
 
 ## Development
 

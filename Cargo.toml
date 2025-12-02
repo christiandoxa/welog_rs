@@ -7,8 +7,10 @@ edition = "2024"
 axum = { version = "0.8", features = ["macros", "json"] }
 bytes = "1"
 tower = "0.5"
+http = "1"
 
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
 
 uuid = { version = "1", features = ["v4"] }
 once_cell = "1.19"
@@ -16,6 +18,9 @@ parking_lot = "0.12"
 chrono = { version = "0.4", features = ["serde", "clock"] }
 whoami = "1.5"
 base64 = "0.22"
+
+# gRPC support (tonic server helpers)
+tonic = { version = "0.14", features = ["transport"] }
 
 # HTTP client sink ke Elasticsearch (blocking, dipakai di thread worker)
 ureq = { version = "3", features = ["json"] }

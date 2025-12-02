@@ -12,12 +12,17 @@ pub mod axum_middleware;
 pub mod config;
 pub mod envkey;
 pub mod generalkey;
+pub mod grpc;
 pub mod logger;
 pub mod model;
 pub mod util;
 
 pub use crate::axum_middleware::{WelogContext, WelogLayer, log_axum_client};
 pub use crate::config::Config;
+pub use crate::grpc::{
+    GrpcContext, WelogGrpcInterceptor, log_grpc_client, with_grpc_stream_logging,
+    with_grpc_unary_logging,
+};
 
 /// Set logger configuration to environment variables, similar to `SetConfig` in Go.
 ///

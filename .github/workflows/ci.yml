@@ -51,4 +51,4 @@ jobs:
           tool: cargo-llvm-cov
 
       - name: Coverage
-        run: cargo llvm-cov --all-features --workspace --tests
+        run: cargo llvm-cov --all-features --workspace --tests --fail-under-lines 80
