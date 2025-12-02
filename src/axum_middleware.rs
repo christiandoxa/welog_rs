@@ -184,7 +184,7 @@ where
 
 /// Build log fields and send them to the logger, equivalent to `logFiber`/`logGin`.
 #[allow(clippy::too_many_arguments)]
-fn log_axum(
+pub(crate) fn log_axum(
     ctx: &WelogContext,
     request_time: DateTime<Utc>,
     latency: Duration,
@@ -309,7 +309,7 @@ pub fn log_axum_client(ctx: &WelogContext, req: TargetRequest, res: TargetRespon
 }
 
 /// Get a header value as string, case-insensitive.
-fn header_to_string(headers: &HeaderMap, name: &str) -> String {
+pub(crate) fn header_to_string(headers: &HeaderMap, name: &str) -> String {
     headers
         .iter()
         .find(|(k, _)| k.as_str().eq_ignore_ascii_case(name))
@@ -319,7 +319,7 @@ fn header_to_string(headers: &HeaderMap, name: &str) -> String {
 }
 
 /// Best-effort client IP detection from headers.
-fn extract_client_ip(headers: &HeaderMap) -> String {
+pub(crate) fn extract_client_ip(headers: &HeaderMap) -> String {
     let candidates = ["x-real-ip", "x-forwarded-for", "x-client-ip"];
 
     for name in candidates.iter() {
@@ -335,7 +335,7 @@ fn extract_client_ip(headers: &HeaderMap) -> String {
     String::new()
 }
 
-fn version_to_string(version: Version) -> String {
+pub(crate) fn version_to_string(version: Version) -> String {
     match version {
         Version::HTTP_09 => "HTTP/0.9",
         Version::HTTP_10 => "HTTP/1.0",

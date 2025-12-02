@@ -34,3 +34,6 @@ pub fn set_config(cfg: Config) {
         env::set_var(envkey::ELASTIC_PASSWORD, cfg.elastic_password);
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -100,6 +100,77 @@ pub fn logger() -> &'static Logger {
     Logger::global()
 }
 
+#[cfg(test)]
+pub(crate) fn test_logger_with_sender(sender: Sender<LogFields>) -> Logger {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_millis(5)))
+        .build()
+        .into();
+
+    Logger {
+        inner: Arc::new(LoggerInner {
+            agent,
+            elastic_url: None,
+            index_prefix: None,
+            username: None,
+            password: None,
+            fallback_path: PathBuf::from("test_logs.txt"),
+            fallback_lock: Mutex::new(()),
+            sender,
+        }),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_build_fallback_bytes(fields: &LogFields, hook_err: Option<&str>) -> Vec<u8> {
+    test_inner(PathBuf::from("test_logs.txt")).build_fallback_bytes(fields, hook_err)
+}
+
+#[cfg(test)]
+pub(crate) fn test_trim_oldest_lines(path: &Path, bytes_to_free: u64) -> io::Result<()> {
+    test_inner(path.to_path_buf()).trim_oldest_lines(bytes_to_free)
+}
+
+#[cfg(test)]
+pub(crate) fn test_send_to_elastic_without_config(fields: &LogFields) -> Result<(), String> {
+    test_inner(PathBuf::from("unused.txt")).send_to_elastic(fields)
+}
+
+#[cfg(test)]
+pub(crate) fn test_write_fallback(
+    path: &Path,
+    fields: &LogFields,
+    hook_err: Option<&str>,
+) -> io::Result<()> {
+    test_inner(path.to_path_buf()).write_fallback(fields, hook_err)
+}
+
+#[cfg(test)]
+fn test_inner(path: PathBuf) -> LoggerInner {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_millis(50)))
+        .build()
+        .into();
+    let (sender, _receiver) = channel();
+
+    LoggerInner {
+        agent,
+        elastic_url: None,
+        index_prefix: None,
+        username: None,
+        password: None,
+        fallback_path: path,
+        fallback_lock: Mutex::new(()),
+        sender,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn run_worker_with_path(path: &Path, receiver: Receiver<LogFields>) {
+    let inner = test_inner(path.to_path_buf());
+    worker_loop(Arc::new(inner), receiver);
+}
+
 fn worker_loop(inner: Arc<LoggerInner>, receiver: Receiver<LogFields>) {
     for fields in receiver {
         if let Err(err) = inner.send_to_elastic(&fields)

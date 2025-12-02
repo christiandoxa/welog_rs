@@ -21,3 +21,6 @@ base64 = "0.22"
 # HTTP client sink ke Elasticsearch (blocking, dipakai di thread worker)
 ureq = { version = "3", features = ["json"] }
 tokio = { version = "1.48.0", features = ["full"] }
+
+[dev-dependencies]
+tempfile = "3"

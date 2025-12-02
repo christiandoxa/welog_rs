@@ -1,3 +1,5 @@
+#![cfg(not(test))]
+
 // src/main.rs
 //
 // Simple entrypoint example to test welog_rs with Axum.
