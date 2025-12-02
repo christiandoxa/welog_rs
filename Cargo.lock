@@ -1293,7 +1293,6 @@ dependencies = [
     "base64",
     "bytes",
     "chrono",
-    "http",
     "once_cell",
     "parking_lot",
     "serde_json",
