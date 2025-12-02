@@ -1,5 +1,5 @@
-/// Counterpart of `pkg/constant/envkey/envkey.go`
-
+//! Counterpart of `pkg/constant/envkey/envkey.go`
+///
 /// ElasticIndex is the env var for the Elasticsearch index prefix.
 /// In Go: `const ElasticIndex = "ELASTIC_INDEX__"`
 pub const ELASTIC_INDEX: &str = "ELASTIC_INDEX__";

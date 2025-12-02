@@ -52,7 +52,7 @@ static LOGGER: OnceCell<Logger> = OnceCell::new();
 impl Logger {
     /// Return the global (singleton) logger instance.
     pub fn global() -> &'static Logger {
-        LOGGER.get_or_init(|| Logger::new_from_env())
+        LOGGER.get_or_init(Logger::new_from_env)
     }
 
     fn new_from_env() -> Logger {
@@ -102,13 +102,13 @@ pub fn logger() -> &'static Logger {
 
 fn worker_loop(inner: Arc<LoggerInner>, receiver: Receiver<LogFields>) {
     for fields in receiver {
-        if let Err(err) = inner.send_to_elastic(&fields) {
-            if let Err(fallback_err) = inner.write_fallback(&fields, Some(&err)) {
-                eprintln!(
-                    "welog_rs: failed to write fallback log to file {:?}: {fallback_err}",
-                    inner.fallback_path
-                );
-            }
+        if let Err(err) = inner.send_to_elastic(&fields)
+            && let Err(fallback_err) = inner.write_fallback(&fields, Some(&err))
+        {
+            eprintln!(
+                "welog_rs: failed to write fallback log to file {:?}: {fallback_err}",
+                inner.fallback_path
+            );
         }
     }
 }
@@ -240,7 +240,7 @@ impl LoggerInner {
 
         // Drop lines until bytes_to_free is reached, then write from the next line onward.
         while reader.read_line(&mut buf)? != 0 {
-            let len_with_newline = buf.as_bytes().len() as u64;
+            let len_with_newline = buf.len() as u64;
             removed += len_with_newline;
             if removed >= bytes_to_free {
                 // Write this line as the first line in the new file.

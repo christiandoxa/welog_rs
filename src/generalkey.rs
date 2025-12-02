@@ -1,5 +1,5 @@
-/// Counterpart of `pkg/constant/generalkey/generalkey.go`
-
+//! Counterpart of `pkg/constant/generalkey/generalkey.go`
+///
 /// ClientLog is the key used to store the list of client (target) logs in the context.
 pub const CLIENT_LOG: &str = "client-log";
 
