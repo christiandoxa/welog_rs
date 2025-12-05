@@ -107,6 +107,30 @@ async fn test_target_handler(Extension(ctx): Extension<Arc<WelogContext>>) -> Js
 }
 ```
 
+### Log arbitrary events (non-Axum/gRPC)
+
+`Logger::log` mirrors `logrus.WithFields(...).Info()` in Go. The helper `logger()` gives you the global instance (same
+shape as Go’s `logger.Logger()`), so you can emit structured logs from anywhere:
+
+```rust
+use serde_json::json;
+use welog_rs::logger::logger;
+use welog_rs::util::LogFields;
+
+fn main() {
+    // Optionally set config first (or rely on env vars):
+    // welog_rs::set_config(...);
+
+    let mut fields = LogFields::new();
+    fields.insert("message".into(), json!("user logged in"));
+    fields.insert("userId".into(), json!(42));
+    fields.insert("roles".into(), json!(["admin", "editor"]));
+
+    // Prints JSON to stdout, enqueues to background worker, and falls back to logs.txt on error.
+    logger().log(fields);
+}
+```
+
 ### How it works
 
 - `WelogLayer` clones the request body, response body, headers, status, latency, and client IP, then sends a structured
