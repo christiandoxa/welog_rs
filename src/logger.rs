@@ -89,6 +89,11 @@ impl Logger {
     ///
     /// Similar to `logrus.Entry.WithFields(...).Info()` in Go: `fields` is the log field map.
     pub fn log(&self, fields: LogFields) {
+        match serde_json::to_string(&fields) {
+            Ok(json) => println!("{json}"),
+            Err(err) => eprintln!("welog_rs: failed to serialize log for stdout: {err}"),
+        }
+
         if let Err(err) = self.inner.sender.send(fields) {
             eprintln!("welog_rs: failed to enqueue log to worker: {err}");
         }
