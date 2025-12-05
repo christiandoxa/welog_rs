@@ -399,7 +399,33 @@ fn log_sends_fields_through_channel() {
     let received = receiver
         .recv_timeout(Duration::from_secs(1))
         .expect("expected log to be sent");
-    assert_eq!(received, fields);
+    assert_eq!(
+        received.get("hello"),
+        Some(&serde_json::Value::String("world".into()))
+    );
+
+    assert!(received.get("@timestamp").is_some());
+
+    let ecs_version = received
+        .get("ecs")
+        .and_then(|v| v.as_object())
+        .and_then(|obj| obj.get("version"))
+        .and_then(|v| v.as_str());
+    assert_eq!(ecs_version, Some("9.2.0"));
+
+    let log_level = received
+        .get("log")
+        .and_then(|v| v.as_object())
+        .and_then(|obj| obj.get("level"))
+        .and_then(|v| v.as_str());
+    assert_eq!(log_level, Some("info"));
+
+    let event_dataset = received
+        .get("event")
+        .and_then(|v| v.as_object())
+        .and_then(|obj| obj.get("dataset"))
+        .and_then(|v| v.as_str());
+    assert_eq!(event_dataset, Some("welog"));
 }
 
 #[test]

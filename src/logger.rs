@@ -17,10 +17,10 @@ use std::thread;
 use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose};
-use chrono::Utc;
+use chrono::{DateTime, SecondsFormat, Utc};
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
-use serde_json::{Map, Value};
+use serde_json::{Map, Number, Value};
 
 use crate::envkey;
 use crate::util::LogFields;
@@ -29,6 +29,8 @@ use crate::util::LogFields;
 const FALLBACK_MAX_BYTES: u64 = 1 << 30;
 /// Path to fallback log file
 const FALLBACK_LOG_PATH: &str = "logs.txt";
+/// ECS version we attach to logs
+const ECS_VERSION: &str = "9.2.0";
 
 /// Main logger that sends logs to Elasticsearch (if configured) and to the fallback file.
 #[derive(Clone)]
@@ -89,12 +91,14 @@ impl Logger {
     ///
     /// Similar to `logrus.Entry.WithFields(...).Info()` in Go: `fields` is the log field map.
     pub fn log(&self, fields: LogFields) {
-        match serde_json::to_string(&fields) {
+        let ecs_fields = enrich_with_ecs(fields);
+
+        match serde_json::to_string(&ecs_fields) {
             Ok(json) => println!("{json}"),
             Err(err) => eprintln!("welog_rs: failed to serialize log for stdout: {err}"),
         }
 
-        if let Err(err) = self.inner.sender.send(fields) {
+        if let Err(err) = self.inner.sender.send(ecs_fields) {
             eprintln!("welog_rs: failed to enqueue log to worker: {err}");
         }
     }
@@ -340,4 +344,232 @@ impl LoggerInner {
 
         Ok(())
     }
+}
+
+fn enrich_with_ecs(mut fields: LogFields) -> LogFields {
+    let request_ts = parse_timestamp(fields.get("requestTimestamp"));
+    let response_ts = parse_timestamp(fields.get("responseTimestamp"));
+
+    let request_ts_for_duration = request_ts.clone();
+
+    let timestamp_string = request_ts
+        .unwrap_or_else(Utc::now)
+        .to_rfc3339_opts(SecondsFormat::Nanos, true);
+
+    fields
+        .entry("@timestamp".to_string())
+        .or_insert(Value::String(timestamp_string.clone()));
+
+    insert_nested_if_absent(
+        &mut fields,
+        &["ecs", "version"],
+        Value::String(ECS_VERSION.to_string()),
+    );
+
+    insert_nested_if_absent(
+        &mut fields,
+        &["log", "level"],
+        Value::String("info".to_string()),
+    );
+
+    insert_nested_if_absent(
+        &mut fields,
+        &["event", "dataset"],
+        Value::String("welog".to_string()),
+    );
+    insert_nested_if_absent(
+        &mut fields,
+        &["event", "module"],
+        Value::String("welog_rs".to_string()),
+    );
+    insert_nested_if_absent(
+        &mut fields,
+        &["event", "start"],
+        Value::String(timestamp_string),
+    );
+
+    if let Some(end) = response_ts {
+        insert_nested_if_absent(
+            &mut fields,
+            &["event", "end"],
+            Value::String(end.to_rfc3339_opts(SecondsFormat::Nanos, true)),
+        );
+
+        if let Some(duration) = request_ts_for_duration.and_then(|start| duration_nanos(start, end))
+        {
+            insert_nested_if_absent(
+                &mut fields,
+                &["event", "duration"],
+                Value::Number(Number::from(duration)),
+            );
+        }
+    }
+
+    if let Some(method) = field_as_string(&fields, "requestMethod") {
+        insert_nested_if_absent(
+            &mut fields,
+            &["http", "request", "method"],
+            Value::String(method),
+        );
+    }
+
+    if let Some(content_type) = field_as_string(&fields, "requestContentType") {
+        insert_nested_if_absent(
+            &mut fields,
+            &["http", "request", "mime_type"],
+            Value::String(content_type),
+        );
+    }
+
+    if let Some(body) = field_as_string(&fields, "requestBodyString") {
+        insert_nested_if_absent(
+            &mut fields,
+            &["http", "request", "body", "content"],
+            Value::String(body),
+        );
+    }
+
+    if let Some(headers) = fields
+        .get("requestHeader")
+        .and_then(|v| v.as_object())
+        .cloned()
+    {
+        insert_nested_if_absent(
+            &mut fields,
+            &["http", "request", "headers"],
+            Value::Object(headers),
+        );
+    }
+
+    if let Some(protocol) = field_as_string(&fields, "requestProtocol") {
+        insert_nested_if_absent(&mut fields, &["http", "version"], Value::String(protocol));
+    }
+
+    if let Some(url) = field_as_string(&fields, "requestUrl") {
+        insert_nested_if_absent(&mut fields, &["url", "full"], Value::String(url));
+    }
+
+    if let Some(domain) = field_as_string(&fields, "requestHostName") {
+        if !domain.is_empty() {
+            insert_nested_if_absent(&mut fields, &["url", "domain"], Value::String(domain));
+        }
+    }
+
+    if let Some(ip) = field_as_string(&fields, "requestIp") {
+        if !ip.is_empty() {
+            insert_nested_if_absent(&mut fields, &["client", "ip"], Value::String(ip));
+        }
+    }
+
+    if let Some(agent) = field_as_string(&fields, "requestAgent") {
+        insert_nested_if_absent(
+            &mut fields,
+            &["user_agent", "original"],
+            Value::String(agent),
+        );
+    }
+
+    if let Some(request_id) = field_as_string(&fields, "requestId") {
+        insert_nested_if_absent(
+            &mut fields,
+            &["http", "request", "id"],
+            Value::String(request_id.clone()),
+        );
+
+        insert_nested_if_absent(&mut fields, &["labels"], Value::Object(Map::new()));
+
+        if let Some(labels) = fields.get_mut("labels").and_then(|v| v.as_object_mut()) {
+            labels
+                .entry("request_id".to_string())
+                .or_insert(Value::String(request_id));
+        }
+    }
+
+    if let Some(status) = fields.get("responseStatus").cloned() {
+        if status.is_number() {
+            insert_nested_if_absent(&mut fields, &["http", "response", "status_code"], status);
+        }
+    }
+
+    if let Some(body) = field_as_string(&fields, "responseBodyString") {
+        insert_nested_if_absent(
+            &mut fields,
+            &["http", "response", "body", "content"],
+            Value::String(body),
+        );
+    }
+
+    if let Some(headers) = fields
+        .get("responseHeader")
+        .and_then(|v| v.as_object())
+        .cloned()
+    {
+        insert_nested_if_absent(
+            &mut fields,
+            &["http", "response", "headers"],
+            Value::Object(headers),
+        );
+    }
+
+    if let Some(user) = field_as_string(&fields, "responseUser") {
+        insert_nested_if_absent(&mut fields, &["user", "name"], Value::String(user));
+    }
+
+    fields
+}
+
+fn insert_nested_if_absent(map: &mut Map<String, Value>, path: &[&str], value: Value) {
+    if path.is_empty() {
+        return;
+    }
+
+    if path.len() == 1 {
+        map.entry(path[0].to_string()).or_insert(value);
+        return;
+    }
+
+    let mut current = ensure_object(map, path[0]);
+    for key in &path[1..path.len() - 1] {
+        current = ensure_object(current, key);
+    }
+
+    current
+        .entry(path[path.len() - 1].to_string())
+        .or_insert(value);
+}
+
+fn ensure_object<'a>(map: &'a mut Map<String, Value>, key: &str) -> &'a mut Map<String, Value> {
+    map.entry(key.to_string())
+        .and_modify(|existing| {
+            if !existing.is_object() {
+                *existing = Value::Object(Map::new());
+            }
+        })
+        .or_insert_with(|| Value::Object(Map::new()));
+
+    map.get_mut(key)
+        .and_then(Value::as_object_mut)
+        .expect("object just inserted")
+}
+
+fn field_as_string(fields: &LogFields, key: &str) -> Option<String> {
+    fields
+        .get(key)
+        .and_then(Value::as_str)
+        .map(|s| s.to_string())
+}
+
+fn parse_timestamp(value: Option<&Value>) -> Option<DateTime<Utc>> {
+    value
+        .and_then(Value::as_str)
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+fn duration_nanos(start: DateTime<Utc>, end: DateTime<Utc>) -> Option<u64> {
+    let nanos = end.signed_duration_since(start).num_nanoseconds()?;
+    if nanos < 0 {
+        return None;
+    }
+    Some(nanos as u64)
 }
