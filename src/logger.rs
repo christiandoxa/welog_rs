@@ -350,7 +350,7 @@ fn enrich_with_ecs(mut fields: LogFields) -> LogFields {
     let request_ts = parse_timestamp(fields.get("requestTimestamp"));
     let response_ts = parse_timestamp(fields.get("responseTimestamp"));
 
-    let request_ts_for_duration = request_ts.clone();
+    let request_ts_for_duration = request_ts;
 
     let timestamp_string = request_ts
         .unwrap_or_else(Utc::now)
@@ -449,16 +449,16 @@ fn enrich_with_ecs(mut fields: LogFields) -> LogFields {
         insert_nested_if_absent(&mut fields, &["url", "full"], Value::String(url));
     }
 
-    if let Some(domain) = field_as_string(&fields, "requestHostName") {
-        if !domain.is_empty() {
-            insert_nested_if_absent(&mut fields, &["url", "domain"], Value::String(domain));
-        }
+    if let Some(domain) = field_as_string(&fields, "requestHostName")
+        && !domain.is_empty()
+    {
+        insert_nested_if_absent(&mut fields, &["url", "domain"], Value::String(domain));
     }
 
-    if let Some(ip) = field_as_string(&fields, "requestIp") {
-        if !ip.is_empty() {
-            insert_nested_if_absent(&mut fields, &["client", "ip"], Value::String(ip));
-        }
+    if let Some(ip) = field_as_string(&fields, "requestIp")
+        && !ip.is_empty()
+    {
+        insert_nested_if_absent(&mut fields, &["client", "ip"], Value::String(ip));
     }
 
     if let Some(agent) = field_as_string(&fields, "requestAgent") {
@@ -485,10 +485,10 @@ fn enrich_with_ecs(mut fields: LogFields) -> LogFields {
         }
     }
 
-    if let Some(status) = fields.get("responseStatus").cloned() {
-        if status.is_number() {
-            insert_nested_if_absent(&mut fields, &["http", "response", "status_code"], status);
-        }
+    if let Some(status) = fields.get("responseStatus").cloned()
+        && status.is_number()
+    {
+        insert_nested_if_absent(&mut fields, &["http", "response", "status_code"], status);
     }
 
     if let Some(body) = field_as_string(&fields, "responseBodyString") {
