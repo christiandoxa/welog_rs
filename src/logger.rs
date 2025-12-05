@@ -17,7 +17,7 @@ use std::thread;
 use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose};
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Local, SecondsFormat};
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
 use serde_json::{Map, Number, Value};
@@ -207,7 +207,7 @@ impl LoggerInner {
             .unwrap_or("welog");
 
         // indexNameFunc in Go: `<ElasticIndex>-YYYY-MM-DD`
-        let index_name = format!("{index_prefix}-{}", Utc::now().format("%Y-%m-%d"));
+        let index_name = format!("{index_prefix}-{}", Local::now().format("%Y-%m-%d"));
 
         let url = format!("{}/{}/_doc", elastic_url.trim_end_matches('/'), index_name);
 
@@ -353,7 +353,7 @@ fn enrich_with_ecs(mut fields: LogFields) -> LogFields {
     let request_ts_for_duration = request_ts;
 
     let timestamp_string = request_ts
-        .unwrap_or_else(Utc::now)
+        .unwrap_or_else(Local::now)
         .to_rfc3339_opts(SecondsFormat::Nanos, true);
 
     fields
@@ -559,14 +559,14 @@ fn field_as_string(fields: &LogFields, key: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-fn parse_timestamp(value: Option<&Value>) -> Option<DateTime<Utc>> {
+fn parse_timestamp(value: Option<&Value>) -> Option<DateTime<Local>> {
     value
         .and_then(Value::as_str)
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| dt.with_timezone(&Utc))
+        .map(|dt| dt.with_timezone(&Local))
 }
 
-fn duration_nanos(start: DateTime<Utc>, end: DateTime<Utc>) -> Option<u64> {
+fn duration_nanos(start: DateTime<Local>, end: DateTime<Local>) -> Option<u64> {
     let nanos = end.signed_duration_since(start).num_nanoseconds()?;
     if nanos < 0 {
         return None;

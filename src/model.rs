@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local};
 use std::time::Duration;
 
 use serde_json::{Map, Value};
@@ -25,7 +25,7 @@ pub struct TargetRequest {
     pub content_type: String,
     pub header: HeaderMapJson,
     pub body: Vec<u8>,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: DateTime<Local>,
 }
 
 /// Counterpart of `model.TargetResponse` in Go:

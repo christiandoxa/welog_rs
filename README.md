@@ -57,7 +57,7 @@ use axum::{routing::get, Extension, Json, Router};
 use serde_json::json;
 use welog_rs::{Config, WelogContext, WelogLayer, log_axum_client, set_config};
 use welog_rs::model::{TargetRequest, TargetResponse};
-use chrono::Utc;
+use chrono::Local;
 
 #[tokio::main]
 async fn main() {
@@ -91,7 +91,7 @@ async fn test_target_handler(Extension(ctx): Extension<Arc<WelogContext>>) -> Js
         content_type: "application/json".into(),
         header: Default::default(),
         body: br#"{"ping":"test"}"#.to_vec(),
-        timestamp: Utc::now(),
+        timestamp: Local::now(),
     };
     let target_res = TargetResponse {
         header: Default::default(),
@@ -189,7 +189,7 @@ impl MyService for MyServiceImpl {
                 content_type: "application/json".into(),
                 header: Default::default(),
                 body: b"{}".to_vec(),
-                timestamp: chrono::Utc::now(),
+                timestamp: chrono::Local::now(),
             }, TargetResponse {
                 header: Default::default(),
                 body: b"{}".to_vec(),

@@ -7,7 +7,7 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, Version};
 use bytes::Bytes;
-use chrono::{TimeZone, Utc};
+use chrono::{Duration as ChronoDuration, Local, SecondsFormat, TimeZone};
 use parking_lot::Mutex;
 use tempfile::NamedTempFile;
 use tower::{Layer, Service, ServiceExt};
@@ -60,7 +60,10 @@ fn header_to_map_converts_values_to_strings() {
 
 #[test]
 fn build_target_log_fields_maps_request_and_response() {
-    let timestamp = Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).single().unwrap();
+    let timestamp = Local
+        .with_ymd_and_hms(2024, 1, 2, 3, 4, 5)
+        .single()
+        .unwrap();
 
     let req = TargetRequest {
         url: "https://example.com/api".into(),
@@ -101,8 +104,9 @@ fn build_target_log_fields_maps_request_and_response() {
         Some(&serde_json::Value::Number(serde_json::Number::from(200)))
     );
 
-    let expected_request_ts = "2024-01-02T03:04:05.000000000Z".to_string();
-    let expected_response_ts = "2024-01-02T03:04:05.150000000Z".to_string();
+    let expected_request_ts = timestamp.to_rfc3339_opts(SecondsFormat::Nanos, true);
+    let expected_response_ts = (timestamp + ChronoDuration::from_std(res.latency).unwrap())
+        .to_rfc3339_opts(SecondsFormat::Nanos, true);
 
     assert_eq!(
         fields.get("targetRequestTimestamp"),
@@ -120,7 +124,10 @@ fn build_target_log_fields_maps_request_and_response() {
 
 #[test]
 fn build_target_log_fields_handles_non_json_body() {
-    let timestamp = Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).single().unwrap();
+    let timestamp = Local
+        .with_ymd_and_hms(2024, 1, 2, 3, 4, 5)
+        .single()
+        .unwrap();
     let req = TargetRequest {
         url: "https://example.com/api".into(),
         method: "GET".into(),
@@ -204,7 +211,7 @@ fn log_axum_client_pushes_target_logs() {
         content_type: "application/json".into(),
         header: Default::default(),
         body: br#"{"a":1}"#.to_vec(),
-        timestamp: Utc::now(),
+        timestamp: Local::now(),
     };
     let res = TargetResponse {
         header: Default::default(),
@@ -232,7 +239,10 @@ async fn log_axum_builds_structured_fields() {
         content_type: "application/json".into(),
         header: Default::default(),
         body: br#"{"ping":"pong"}"#.to_vec(),
-        timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).single().unwrap(),
+        timestamp: Local
+            .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
+            .single()
+            .unwrap(),
     };
     let target_res = TargetResponse {
         header: Default::default(),
@@ -263,7 +273,10 @@ async fn log_axum_builds_structured_fields() {
         client_log,
     };
 
-    let request_time = Utc.with_ymd_and_hms(2024, 6, 3, 12, 0, 0).single().unwrap();
+    let request_time = Local
+        .with_ymd_and_hms(2024, 6, 3, 12, 0, 0)
+        .single()
+        .unwrap();
     let latency = Duration::from_millis(200);
     let method = Method::POST;
     let uri = Uri::from_str("http://example.com/demo?x=1").unwrap();
@@ -330,8 +343,9 @@ async fn log_axum_builds_structured_fields() {
         Some(1)
     );
 
-    let expected_request_ts = "2024-06-03T12:00:00.000000000Z".to_string();
-    let expected_response_ts = "2024-06-03T12:00:00.200000000Z".to_string();
+    let expected_request_ts = request_time.to_rfc3339_opts(SecondsFormat::Nanos, true);
+    let expected_response_ts = (request_time + ChronoDuration::from_std(latency).unwrap())
+        .to_rfc3339_opts(SecondsFormat::Nanos, true);
     assert_eq!(
         fields.get("requestTimestamp"),
         Some(&serde_json::Value::String(expected_request_ts))
@@ -590,7 +604,7 @@ async fn with_grpc_unary_logging_logs_payload_and_target() {
                 content_type: "application/json".into(),
                 header: Default::default(),
                 body: br#"{"ping":"pong"}"#.to_vec(),
-                timestamp: Utc::now(),
+                timestamp: Local::now(),
             },
             TargetResponse {
                 header: Default::default(),

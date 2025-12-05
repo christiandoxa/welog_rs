@@ -21,7 +21,7 @@ use axum::http::{
     HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, Uri, Version,
 };
 use bytes::Bytes;
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Local, SecondsFormat};
 use parking_lot::Mutex;
 use serde_json::{Map, Number, Value};
 use tower::{Layer, Service};
@@ -92,7 +92,7 @@ where
 
         Box::pin(async move {
             let start_instant = Instant::now();
-            let request_time: DateTime<Utc> = Utc::now();
+            let request_time: DateTime<Local> = Local::now();
 
             // Split parts and body to capture them.
             let (mut parts, body) = req.into_parts();
@@ -186,7 +186,7 @@ where
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn log_axum(
     ctx: &WelogContext,
-    request_time: DateTime<Utc>,
+    request_time: DateTime<Local>,
     latency: Duration,
     method: &Method,
     uri: &Uri,

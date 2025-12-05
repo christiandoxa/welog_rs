@@ -15,7 +15,7 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use axum::{Json, Router, extract::Extension, routing::get};
-use chrono::Utc;
+use chrono::Local;
 use serde_json::{Map, Value, json};
 
 use welog_rs::model::{TargetRequest, TargetResponse};
@@ -85,7 +85,7 @@ async fn test_target_handler(Extension(ctx): Extension<Arc<WelogContext>>) -> Js
             h
         },
         body: br#"{"ping":"test"}"#.to_vec(),
-        timestamp: Utc::now(),
+        timestamp: Local::now(),
     };
 
     // Dummy response from that “service”

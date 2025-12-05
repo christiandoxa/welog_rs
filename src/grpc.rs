@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine::general_purpose};
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Local, SecondsFormat};
 use http::Extensions;
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -86,7 +86,7 @@ where
     F: FnOnce(Request<Req>) -> Fut,
     Fut: Future<Output = Result<Response<Res>, Status>>,
 {
-    let request_time: DateTime<Utc> = Utc::now();
+    let request_time: DateTime<Local> = Local::now();
     let start = Instant::now();
 
     let (request_fields, request_string) = capture_payload(&request);
@@ -157,7 +157,7 @@ where
     F: FnOnce(Request<Req>) -> Fut,
     Fut: Future<Output = Result<Response<Res>, Status>>,
 {
-    let request_time: DateTime<Utc> = Utc::now();
+    let request_time: DateTime<Local> = Local::now();
     let start = Instant::now();
 
     let (request_fields, request_string) = capture_payload(&request);
@@ -270,7 +270,7 @@ fn log_grpc_unary(
     peer: &str,
     code: Code,
     error: Option<&str>,
-    request_time: DateTime<Utc>,
+    request_time: DateTime<Local>,
     latency: Duration,
     request_body: LogFields,
     request_body_string: String,
@@ -336,7 +336,7 @@ fn log_grpc_stream(
     peer: &str,
     code: Code,
     error: Option<&str>,
-    request_time: DateTime<Utc>,
+    request_time: DateTime<Local>,
     latency: Duration,
     request_body: LogFields,
     request_body_string: String,
