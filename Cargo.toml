@@ -1,7 +1,12 @@
 [package]
 name = "welog_rs"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
+description = "Structured logging with Elasticsearch sink and file fallback"
+license = "MIT"
+repository = "https://github.com/christiandoxa/welog_rs"
+readme = "README.md"
+keywords = ["logging", "axum", "tonic", "grpc", "elasticsearch"]
 
 [dependencies]
 axum = { version = "0.8", features = ["macros", "json"] }
