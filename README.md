@@ -29,15 +29,15 @@ If any are missing/empty, logs are written to `logs.txt` in the working director
 
 ### Add the dependency
 
-Add directly from this repo:
+Add from crates.io:
 
 ```toml
 [dependencies]
-welog_rs = { git = "https://github.com/christiandoxa/welog_rs.git" }
+welog_rs = "1"
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["macros", "json"] }
 # only for gRPC
-tonic = { version = "0.12", features = ["transport"] }
+tonic = { version = "0.14", features = ["transport"] }
 ```
 
 Or if you vendored the crate locally:
@@ -47,6 +47,7 @@ Or if you vendored the crate locally:
 welog_rs = { path = "." } # or use your crate source path
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["macros", "json"] }
+tonic = { version = "0.14", features = ["transport"] }
 ```
 
 ### Configure and start Axum
