@@ -368,12 +368,8 @@ impl LoggerInner {
         let _ = (&req, &body);
 
         #[cfg(test)]
-        let resp_result = test_elastic_response().unwrap_or_else(|| {
-            Err(ureq::Error::Io(io::Error::new(
-                io::ErrorKind::Other,
-                "missing test behavior",
-            )))
-        });
+        let resp_result = test_elastic_response()
+            .unwrap_or_else(|| Err(ureq::Error::Io(io::Error::other("missing test behavior"))));
         #[cfg(not(test))]
         let resp_result = req.send_json(body);
 
@@ -395,10 +391,7 @@ impl LoggerInner {
     fn write_fallback(&self, fields: &LogFields, hook_err: Option<&str>) -> io::Result<()> {
         #[cfg(test)]
         if FORCE_WRITE_FALLBACK_ERROR.load(Ordering::Relaxed) {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "forced write_fallback error",
-            ));
+            return Err(io::Error::other("forced write_fallback error"));
         }
 
         let log_bytes = self.build_fallback_bytes(fields, hook_err);
@@ -729,10 +722,7 @@ fn test_elastic_response() -> Option<Result<ureq::http::Response<ureq::Body>, ur
             }
         }
         TestElasticBehavior::Status(code) => Err(ureq::Error::StatusCode(code)),
-        TestElasticBehavior::Io => Err(ureq::Error::Io(io::Error::new(
-            io::ErrorKind::Other,
-            "forced io error",
-        ))),
+        TestElasticBehavior::Io => Err(ureq::Error::Io(io::Error::other("forced io error"))),
     };
     Some(result)
 }

@@ -84,10 +84,7 @@ impl Stream for ErrorStream {
             Poll::Ready(None)
         } else {
             self.yielded = true;
-            Poll::Ready(Some(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "stream error",
-            ))))
+            Poll::Ready(Some(Err(std::io::Error::other("stream error"))))
         }
     }
 }
@@ -167,7 +164,7 @@ impl Service<http::Request<Body>> for AxumTestService {
                     };
                     Ok(http::Response::builder().status(status).body(body).unwrap())
                 }
-                AxumServiceMode::Err => Err(std::io::Error::new(std::io::ErrorKind::Other, "boom")),
+                AxumServiceMode::Err => Err(std::io::Error::other("boom")),
             }
         })
     }

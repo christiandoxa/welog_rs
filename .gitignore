@@ -11,3 +11,5 @@ logs.txt
 
 # Misc backups
 *.rs.bk
+
+coverage.out
