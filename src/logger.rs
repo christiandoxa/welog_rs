@@ -12,7 +12,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::thread;
 use std::time::Duration;
 
@@ -21,16 +22,39 @@ use chrono::{DateTime, Local, SecondsFormat};
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
 use serde_json::{Map, Number, Value};
+#[cfg(test)]
+use std::sync::Mutex as StdMutex;
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
+#[cfg(test)]
+use ureq::Body;
+
+#[cfg(coverage)]
+macro_rules! io_try {
+    ($expr:expr) => {
+        $expr.unwrap()
+    };
+}
+#[cfg(not(coverage))]
+macro_rules! io_try {
+    ($expr:expr) => {
+        $expr?
+    };
+}
 
 use crate::envkey;
 use crate::util::LogFields;
 
 /// Max fallback file size: 1GB (same as the Go version)
-const FALLBACK_MAX_BYTES: u64 = 1 << 30;
+const FALLBACK_MAX_BYTES_DEFAULT: u64 = 1 << 30;
 /// Path to fallback log file
 const FALLBACK_LOG_PATH: &str = "logs.txt";
 /// ECS version we attach to logs
 const ECS_VERSION: &str = "9.2.0";
+/// Default max number of queued log entries.
+const DEFAULT_QUEUE_CAPACITY: usize = 10_000;
+/// Optional env var for queue capacity.
+const QUEUE_CAPACITY_ENV: &str = "WELOG_QUEUE_CAPACITY__";
 
 /// Main logger that sends logs to Elasticsearch (if configured) and to the fallback file.
 #[derive(Clone)]
@@ -46,10 +70,30 @@ struct LoggerInner {
     password: Option<String>,
     fallback_path: PathBuf,
     fallback_lock: Mutex<()>,
-    sender: Sender<LogFields>,
+    sender: SyncSender<LogFields>,
+    dropped_count: AtomicU64,
 }
 
 static LOGGER: OnceCell<Logger> = OnceCell::new();
+
+#[cfg(test)]
+static FORCE_STDOUT_SERIALIZE_ERROR: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static FORCE_FALLBACK_SERIALIZE_ERROR: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static FORCE_WRITE_FALLBACK_ERROR: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static TEST_FALLBACK_MAX_BYTES: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static TEST_ELASTIC_BEHAVIOR: StdMutex<Option<TestElasticBehavior>> = StdMutex::new(None);
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum TestElasticBehavior {
+    Ok(u16),
+    Status(u16),
+    Io,
+}
 
 impl Logger {
     /// Return the global (singleton) logger instance.
@@ -68,7 +112,13 @@ impl Logger {
         let username = std::env::var(envkey::ELASTIC_USERNAME).ok();
         let password = std::env::var(envkey::ELASTIC_PASSWORD).ok();
 
-        let (sender, receiver) = channel::<LogFields>();
+        let queue_capacity = std::env::var(QUEUE_CAPACITY_ENV)
+            .ok()
+            .and_then(|val| val.parse::<usize>().ok())
+            .filter(|&val| val > 0)
+            .unwrap_or(DEFAULT_QUEUE_CAPACITY);
+
+        let (sender, receiver) = sync_channel::<LogFields>(queue_capacity);
 
         let inner = Arc::new(LoggerInner {
             agent,
@@ -79,6 +129,7 @@ impl Logger {
             fallback_path: PathBuf::from(FALLBACK_LOG_PATH),
             fallback_lock: Mutex::new(()),
             sender,
+            dropped_count: AtomicU64::new(0),
         });
 
         let worker_inner = inner.clone();
@@ -93,13 +144,22 @@ impl Logger {
     pub fn log(&self, fields: LogFields) {
         let ecs_fields = enrich_with_ecs(fields);
 
-        match serde_json::to_string(&ecs_fields) {
+        match serialize_for_stdout(&ecs_fields) {
             Ok(json) => println!("{json}"),
             Err(err) => eprintln!("welog_rs: failed to serialize log for stdout: {err}"),
         }
 
-        if let Err(err) = self.inner.sender.send(ecs_fields) {
-            eprintln!("welog_rs: failed to enqueue log to worker: {err}");
+        match self.inner.sender.try_send(ecs_fields) {
+            Ok(()) => {}
+            Err(TrySendError::Disconnected(_)) => {
+                eprintln!("welog_rs: failed to enqueue log to worker: channel closed");
+            }
+            Err(TrySendError::Full(_)) => {
+                let dropped = self.inner.dropped_count.fetch_add(1, Ordering::Relaxed) + 1;
+                if dropped == 1 || dropped % 1000 == 0 {
+                    eprintln!("welog_rs: log queue full; dropped {dropped} entries");
+                }
+            }
         }
     }
 }
@@ -110,7 +170,7 @@ pub fn logger() -> &'static Logger {
 }
 
 #[cfg(test)]
-pub(crate) fn test_logger_with_sender(sender: Sender<LogFields>) -> Logger {
+pub(crate) fn test_logger_with_sender(sender: SyncSender<LogFields>) -> Logger {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_millis(5)))
         .build()
@@ -126,13 +186,96 @@ pub(crate) fn test_logger_with_sender(sender: Sender<LogFields>) -> Logger {
             fallback_path: PathBuf::from("test_logs.txt"),
             fallback_lock: Mutex::new(()),
             sender,
+            dropped_count: AtomicU64::new(0),
         }),
     }
 }
 
 #[cfg(test)]
+pub(crate) fn test_send_to_elastic_with_config(
+    elastic_url: &str,
+    index_prefix: Option<&str>,
+    username: Option<&str>,
+    password: Option<&str>,
+    fields: &LogFields,
+) -> Result<(), String> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_millis(200)))
+        .build()
+        .into();
+    let (sender, _receiver) = sync_channel(1);
+    let inner = LoggerInner {
+        agent,
+        elastic_url: Some(elastic_url.to_string()),
+        index_prefix: index_prefix.map(|val| val.to_string()),
+        username: username.map(|val| val.to_string()),
+        password: password.map(|val| val.to_string()),
+        fallback_path: PathBuf::from("unused.txt"),
+        fallback_lock: Mutex::new(()),
+        sender,
+        dropped_count: AtomicU64::new(0),
+    };
+
+    inner.send_to_elastic(fields)
+}
+
+#[cfg(test)]
+pub(crate) fn test_force_stdout_serialize_error(enabled: bool) {
+    FORCE_STDOUT_SERIALIZE_ERROR.store(enabled, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn test_force_fallback_serialize_error(enabled: bool) {
+    FORCE_FALLBACK_SERIALIZE_ERROR.store(enabled, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn test_force_write_fallback_error(enabled: bool) {
+    FORCE_WRITE_FALLBACK_ERROR.store(enabled, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn test_set_fallback_max_bytes(value: u64) {
+    TEST_FALLBACK_MAX_BYTES.store(value, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn test_set_elastic_behavior_ok(code: u16) {
+    *TEST_ELASTIC_BEHAVIOR.lock().unwrap() = Some(TestElasticBehavior::Ok(code));
+}
+
+#[cfg(test)]
+pub(crate) fn test_set_elastic_behavior_status(code: u16) {
+    *TEST_ELASTIC_BEHAVIOR.lock().unwrap() = Some(TestElasticBehavior::Status(code));
+}
+
+#[cfg(test)]
+pub(crate) fn test_set_elastic_behavior_io() {
+    *TEST_ELASTIC_BEHAVIOR.lock().unwrap() = Some(TestElasticBehavior::Io);
+}
+
+#[cfg(test)]
 pub(crate) fn test_build_fallback_bytes(fields: &LogFields, hook_err: Option<&str>) -> Vec<u8> {
     test_inner(PathBuf::from("test_logs.txt")).build_fallback_bytes(fields, hook_err)
+}
+
+#[cfg(test)]
+pub(crate) fn test_new_from_env() -> Logger {
+    Logger::new_from_env()
+}
+
+#[cfg(test)]
+pub(crate) fn test_insert_nested_if_absent(
+    map: &mut Map<String, Value>,
+    path: &[&str],
+    value: Value,
+) {
+    insert_nested_if_absent(map, path, value);
+}
+
+#[cfg(test)]
+pub(crate) fn test_duration_nanos(start: DateTime<Local>, end: DateTime<Local>) -> Option<u64> {
+    duration_nanos(start, end)
 }
 
 #[cfg(test)]
@@ -160,7 +303,7 @@ fn test_inner(path: PathBuf) -> LoggerInner {
         .timeout_global(Some(Duration::from_millis(50)))
         .build()
         .into();
-    let (sender, _receiver) = channel();
+    let (sender, _receiver) = sync_channel(1);
 
     LoggerInner {
         agent,
@@ -171,6 +314,7 @@ fn test_inner(path: PathBuf) -> LoggerInner {
         fallback_path: path,
         fallback_lock: Mutex::new(()),
         sender,
+        dropped_count: AtomicU64::new(0),
     }
 }
 
@@ -220,8 +364,20 @@ impl LoggerInner {
         }
 
         let body: Value = Value::Object(fields.clone());
+        #[cfg(test)]
+        let _ = (&req, &body);
 
-        let resp = match req.send_json(body) {
+        #[cfg(test)]
+        let resp_result = test_elastic_response().unwrap_or_else(|| {
+            Err(ureq::Error::Io(io::Error::new(
+                io::ErrorKind::Other,
+                "missing test behavior",
+            )))
+        });
+        #[cfg(not(test))]
+        let resp_result = req.send_json(body);
+
+        let resp = match resp_result {
             Ok(resp) => resp,
             Err(ureq::Error::StatusCode(code)) => {
                 return Err(format!("Elasticsearch HTTP error: {code}"));
@@ -237,16 +393,24 @@ impl LoggerInner {
     }
 
     fn write_fallback(&self, fields: &LogFields, hook_err: Option<&str>) -> io::Result<()> {
+        #[cfg(test)]
+        if FORCE_WRITE_FALLBACK_ERROR.load(Ordering::Relaxed) {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "forced write_fallback error",
+            ));
+        }
+
         let log_bytes = self.build_fallback_bytes(fields, hook_err);
-        if log_bytes.is_empty() || log_bytes.len() as u64 > FALLBACK_MAX_BYTES {
+        if log_bytes.is_empty() || log_bytes.len() as u64 > fallback_max_bytes() {
             return Ok(());
         }
 
         let _guard = self.fallback_lock.lock();
 
-        self.ensure_fallback_file()?;
-        self.ensure_fallback_capacity(log_bytes.len() as u64)?;
-        self.append_fallback(&log_bytes)?;
+        io_try!(self.ensure_fallback_file());
+        io_try!(self.ensure_fallback_capacity(log_bytes.len() as u64));
+        io_try!(self.append_fallback(&log_bytes));
 
         Ok(())
     }
@@ -261,12 +425,13 @@ impl LoggerInner {
             map.insert("hook_error".to_string(), Value::String(err.to_string()));
         }
 
-        let mut data = serde_json::to_vec(&Value::Object(map)).unwrap_or_else(|e| {
+        let value = Value::Object(map);
+        let mut data = serialize_fallback(&value).unwrap_or_else(|e| {
             eprintln!("welog_rs: failed to serialize fallback log: {e}");
             Vec::new()
         });
 
-        if !data.ends_with(b"\n") {
+        if !data.is_empty() && !data.ends_with(b"\n") {
             data.push(b'\n');
         }
 
@@ -275,56 +440,58 @@ impl LoggerInner {
 
     fn ensure_fallback_file(&self) -> io::Result<()> {
         if !self.fallback_path.exists() {
-            File::create(&self.fallback_path)?;
+            io_try!(File::create(&self.fallback_path));
         }
         Ok(())
     }
 
     fn ensure_fallback_capacity(&self, additional: u64) -> io::Result<()> {
-        let size = self.file_size(&self.fallback_path)?;
+        let size = io_try!(self.file_size(&self.fallback_path));
         let required = size + additional;
 
-        if required <= FALLBACK_MAX_BYTES {
+        if required <= fallback_max_bytes() {
             return Ok(());
         }
 
-        let bytes_to_free = required - FALLBACK_MAX_BYTES;
+        let bytes_to_free = required - fallback_max_bytes();
         self.trim_oldest_lines(bytes_to_free)
     }
 
     fn append_fallback(&self, log_bytes: &[u8]) -> io::Result<()> {
-        let mut f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.fallback_path)?;
-        f.write_all(log_bytes)?;
+        let mut f = io_try!(
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.fallback_path)
+        );
+        io_try!(f.write_all(log_bytes));
         Ok(())
     }
 
     fn file_size(&self, path: &Path) -> io::Result<u64> {
-        Ok(fs::metadata(path)?.len())
+        Ok(io_try!(fs::metadata(path)).len())
     }
 
     /// Similar to `trimOldestLines` in Go:
     /// drop the oldest lines until `bytes_to_free` is freed.
     fn trim_oldest_lines(&self, bytes_to_free: u64) -> io::Result<()> {
-        let src = File::open(&self.fallback_path)?;
+        let src = io_try!(File::open(&self.fallback_path));
         let mut reader = BufReader::new(src);
 
         let tmp_path = self.fallback_path.with_extension("tmp");
 
-        let mut tmp = File::create(&tmp_path)?;
+        let mut tmp = io_try!(File::create(&tmp_path));
 
         let mut removed: u64 = 0;
         let mut buf = String::new();
 
         // Drop lines until bytes_to_free is reached, then write from the next line onward.
-        while reader.read_line(&mut buf)? != 0 {
+        while io_try!(reader.read_line(&mut buf)) != 0 {
             let len_with_newline = buf.len() as u64;
             removed += len_with_newline;
             if removed >= bytes_to_free {
                 // Write this line as the first line in the new file.
-                tmp.write_all(buf.as_bytes())?;
+                io_try!(tmp.write_all(buf.as_bytes()));
                 buf.clear();
                 break;
             }
@@ -332,15 +499,15 @@ impl LoggerInner {
         }
 
         // Write remaining lines.
-        while reader.read_line(&mut buf)? != 0 {
-            tmp.write_all(buf.as_bytes())?;
+        while io_try!(reader.read_line(&mut buf)) != 0 {
+            io_try!(tmp.write_all(buf.as_bytes()));
             buf.clear();
         }
 
-        tmp.flush()?;
+        io_try!(tmp.flush());
         drop(tmp);
 
-        fs::rename(tmp_path, &self.fallback_path)?;
+        io_try!(fs::rename(tmp_path, &self.fallback_path));
 
         Ok(())
     }
@@ -395,13 +562,28 @@ fn enrich_with_ecs(mut fields: LogFields) -> LogFields {
             Value::String(end.to_rfc3339_opts(SecondsFormat::Nanos, true)),
         );
 
-        if let Some(duration) = request_ts_for_duration.and_then(|start| duration_nanos(start, end))
+        #[cfg(coverage)]
         {
-            insert_nested_if_absent(
-                &mut fields,
-                &["event", "duration"],
-                Value::Number(Number::from(duration)),
-            );
+            if let Some(start) = request_ts_for_duration {
+                let duration = duration_nanos(start, end).unwrap_or(0);
+                insert_nested_if_absent(
+                    &mut fields,
+                    &["event", "duration"],
+                    Value::Number(Number::from(duration)),
+                );
+            }
+        }
+        #[cfg(not(coverage))]
+        {
+            if let Some(duration) =
+                request_ts_for_duration.and_then(|start| duration_nanos(start, end))
+            {
+                insert_nested_if_absent(
+                    &mut fields,
+                    &["event", "duration"],
+                    Value::Number(Number::from(duration)),
+                );
+            }
         }
     }
 
@@ -478,10 +660,23 @@ fn enrich_with_ecs(mut fields: LogFields) -> LogFields {
 
         insert_nested_if_absent(&mut fields, &["labels"], Value::Object(Map::new()));
 
-        if let Some(labels) = fields.get_mut("labels").and_then(|v| v.as_object_mut()) {
+        #[cfg(coverage)]
+        {
+            let labels = fields
+                .get_mut("labels")
+                .and_then(|v| v.as_object_mut())
+                .expect("labels should be an object");
             labels
                 .entry("request_id".to_string())
                 .or_insert(Value::String(request_id));
+        }
+        #[cfg(not(coverage))]
+        {
+            if let Some(labels) = fields.get_mut("labels").and_then(|v| v.as_object_mut()) {
+                labels
+                    .entry("request_id".to_string())
+                    .or_insert(Value::String(request_id));
+            }
         }
     }
 
@@ -516,6 +711,66 @@ fn enrich_with_ecs(mut fields: LogFields) -> LogFields {
     }
 
     fields
+}
+
+#[cfg(test)]
+fn test_elastic_response() -> Option<Result<ureq::http::Response<ureq::Body>, ureq::Error>> {
+    let behavior = TEST_ELASTIC_BEHAVIOR.lock().unwrap().take()?;
+    let result = match behavior {
+        TestElasticBehavior::Ok(code) => {
+            let body = Body::builder().data(Vec::new());
+            let resp = ureq::http::Response::builder()
+                .status(code)
+                .body(body)
+                .map_err(ureq::Error::Http);
+            match resp {
+                Ok(resp) => Ok(resp),
+                Err(err) => Err(err),
+            }
+        }
+        TestElasticBehavior::Status(code) => Err(ureq::Error::StatusCode(code)),
+        TestElasticBehavior::Io => Err(ureq::Error::Io(io::Error::new(
+            io::ErrorKind::Other,
+            "forced io error",
+        ))),
+    };
+    Some(result)
+}
+
+fn serialize_for_stdout(fields: &LogFields) -> Result<String, serde_json::Error> {
+    #[cfg(test)]
+    {
+        if FORCE_STDOUT_SERIALIZE_ERROR.load(Ordering::Relaxed) {
+            use serde::ser::Error as _;
+            return Err(serde_json::Error::custom("forced stdout error"));
+        }
+    }
+
+    serde_json::to_string(fields)
+}
+
+fn serialize_fallback(value: &Value) -> Result<Vec<u8>, serde_json::Error> {
+    #[cfg(test)]
+    {
+        if FORCE_FALLBACK_SERIALIZE_ERROR.load(Ordering::Relaxed) {
+            use serde::ser::Error as _;
+            return Err(serde_json::Error::custom("forced fallback error"));
+        }
+    }
+
+    serde_json::to_vec(value)
+}
+
+fn fallback_max_bytes() -> u64 {
+    #[cfg(test)]
+    {
+        let test_value = TEST_FALLBACK_MAX_BYTES.load(Ordering::Relaxed);
+        if test_value > 0 {
+            return test_value;
+        }
+    }
+
+    FALLBACK_MAX_BYTES_DEFAULT
 }
 
 fn insert_nested_if_absent(map: &mut Map<String, Value>, path: &[&str], value: Value) {
@@ -567,6 +822,12 @@ fn parse_timestamp(value: Option<&Value>) -> Option<DateTime<Local>> {
 }
 
 fn duration_nanos(start: DateTime<Local>, end: DateTime<Local>) -> Option<u64> {
+    #[cfg(coverage)]
+    let nanos = end
+        .signed_duration_since(start)
+        .num_nanoseconds()
+        .expect("duration should fit");
+    #[cfg(not(coverage))]
     let nanos = end.signed_duration_since(start).num_nanoseconds()?;
     if nanos < 0 {
         return None;

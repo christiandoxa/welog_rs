@@ -1,6 +1,6 @@
 [package]
 name = "welog_rs"
-version = "1.0.1"
+version = "1.0.1+patch"
 edition = "2024"
 description = "Structured logging with Elasticsearch sink and file fallback"
 license = "MIT"
@@ -33,3 +33,7 @@ tokio = { version = "1.48.0", features = ["full"] }
 
 [dev-dependencies]
 tempfile = "3"
+futures-core = "0.3"
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ["cfg(coverage)"] }

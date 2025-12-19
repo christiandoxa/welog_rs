@@ -28,8 +28,17 @@ use crate::generalkey;
 use crate::logger;
 use crate::model::{TargetRequest, TargetResponse};
 use crate::util::{LogFields, build_target_log_fields};
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const REQUEST_ID_METADATA_KEY: &str = "x-request-id";
+/// Cap target logs per request to avoid unbounded growth.
+const MAX_TARGET_LOGS: usize = 1000;
+
+#[cfg(test)]
+static FORCE_INVALID_REQUEST_ID_KEY: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static FORCE_INVALID_HEADER_KEY: AtomicBool = AtomicBool::new(false);
 
 /// Request-scoped context stored in gRPC request extensions.
 #[derive(Clone)]
@@ -216,21 +225,28 @@ where
 pub fn log_grpc_client(ctx: &GrpcContext, req: TargetRequest, res: TargetResponse) {
     let log_data = build_target_log_fields(&req, &res);
     let mut guard = ctx.client_log.lock();
-    guard.push(log_data);
+    if guard.len() < MAX_TARGET_LOGS {
+        guard.push(log_data);
+    }
 }
 
 fn ensure_context<T>(request: &mut Request<T>) -> Arc<GrpcContext> {
-    if let Some(ctx) = request.extensions().get::<Arc<GrpcContext>>() {
+    let metadata = request.metadata().clone();
+    ensure_context_parts(&metadata, request.extensions_mut())
+}
+
+fn ensure_context_parts(metadata: &MetadataMap, extensions: &mut Extensions) -> Arc<GrpcContext> {
+    if let Some(ctx) = extensions.get::<Arc<GrpcContext>>() {
         return ctx.clone();
     }
 
-    let request_id = fetch_request_id(request.metadata());
+    let request_id = fetch_request_id(metadata);
     let ctx = Arc::new(GrpcContext {
         request_id,
         logger: Arc::new(logger::logger().clone()),
         client_log: Arc::new(Mutex::new(Vec::new())),
     });
-    request.extensions_mut().insert(ctx.clone());
+    extensions.insert(ctx.clone());
     ctx
 }
 
@@ -243,13 +259,17 @@ where
 }
 
 fn serialize_message<T: Serialize>(msg: &T) -> (LogFields, String) {
+    serialize_value_result(serde_json::to_value(msg))
+}
+
+fn serialize_value_result(result: Result<Value, serde_json::Error>) -> (LogFields, String) {
     let mut fields = LogFields::new();
     let string_repr;
 
-    match serde_json::to_value(msg) {
+    match result {
         Ok(Value::Object(obj)) => {
+            string_repr = serde_json::to_string(&Value::Object(obj.clone())).unwrap_or_default();
             fields = obj;
-            string_repr = serde_json::to_string(msg).unwrap_or_default();
         }
         Ok(other) => {
             string_repr = other.to_string();
@@ -427,16 +447,17 @@ fn metadata_to_map(md: &MetadataMap) -> Map<String, Value> {
 }
 
 fn read_client_log(client_log: &Arc<Mutex<Vec<LogFields>>>) -> Vec<Value> {
-    let guard = client_log.lock();
-    guard
-        .iter()
-        .cloned()
-        .map(Value::Object)
-        .collect::<Vec<Value>>()
+    let mut guard = client_log.lock();
+    let logs = std::mem::take(&mut *guard);
+    logs.into_iter().map(Value::Object).collect::<Vec<Value>>()
 }
 
 fn grpc_method<T>(request: &Request<T>) -> String {
-    if let Some(method) = request.extensions().get::<GrpcMethod>() {
+    grpc_method_from_extensions(request.extensions())
+}
+
+fn grpc_method_from_extensions(extensions: &Extensions) -> String {
+    if let Some(method) = extensions.get::<GrpcMethod>() {
         return format!("/{}/{}", method.service(), method.method());
     }
 
@@ -461,21 +482,20 @@ fn fetch_request_id(md: &MetadataMap) -> String {
         return val.to_string();
     }
 
-    if let Ok(alt_key) = MetadataKey::<Ascii>::from_bytes(
-        generalkey::REQUEST_ID_HEADER
-            .to_ascii_lowercase()
-            .as_bytes(),
-    ) && let Some(val) = md.get(&alt_key).and_then(|v| v.to_str().ok())
-        && !val.is_empty()
-    {
-        return val.to_string();
-    }
-
     String::new()
 }
 
 fn request_id_metadata_key() -> MetadataKey<Ascii> {
-    MetadataKey::from_bytes(REQUEST_ID_METADATA_KEY.as_bytes())
+    #[cfg(test)]
+    let bytes = if FORCE_INVALID_REQUEST_ID_KEY.load(Ordering::Relaxed) {
+        b"X REQUEST ID".as_slice()
+    } else {
+        REQUEST_ID_METADATA_KEY.as_bytes()
+    };
+    #[cfg(not(test))]
+    let bytes = REQUEST_ID_METADATA_KEY.as_bytes();
+
+    MetadataKey::from_bytes(bytes)
         .unwrap_or_else(|_| MetadataKey::from_static(REQUEST_ID_METADATA_KEY))
 }
 
@@ -483,14 +503,112 @@ fn set_request_id(md: &mut MetadataMap, request_id: &str) {
     let key = request_id_metadata_key();
     if let Ok(value) = MetadataValue::try_from(request_id) {
         md.insert(key, value.clone());
-        if let Ok(header_key) = MetadataKey::<Ascii>::from_bytes(
-            generalkey::REQUEST_ID_HEADER
-                .to_ascii_lowercase()
-                .as_bytes(),
-        ) {
+        #[cfg(test)]
+        let header_key_string = if FORCE_INVALID_HEADER_KEY.load(Ordering::Relaxed) {
+            "X REQUEST ID".to_string()
+        } else {
+            generalkey::REQUEST_ID_HEADER.to_ascii_lowercase()
+        };
+        #[cfg(not(test))]
+        let header_key_string = generalkey::REQUEST_ID_HEADER.to_ascii_lowercase();
+        let header_bytes = header_key_string.as_bytes();
+
+        if let Ok(header_key) = MetadataKey::<Ascii>::from_bytes(header_bytes) {
             md.insert(header_key, value);
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn test_set_request_id(md: &mut MetadataMap, request_id: &str) {
+    set_request_id(md, request_id);
+}
+
+#[cfg(test)]
+pub(crate) fn test_ensure_context<T>(request: &mut Request<T>) -> Arc<GrpcContext> {
+    ensure_context(request)
+}
+
+#[cfg(test)]
+pub(crate) fn test_force_invalid_request_id_key(enabled: bool) {
+    FORCE_INVALID_REQUEST_ID_KEY.store(enabled, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn test_force_invalid_header_key(enabled: bool) {
+    FORCE_INVALID_HEADER_KEY.store(enabled, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn test_request_id_metadata_key() -> MetadataKey<Ascii> {
+    request_id_metadata_key()
+}
+
+#[cfg(test)]
+pub(crate) fn test_serialize_value(value: Value) -> (LogFields, String) {
+    serialize_value_result(Ok(value))
+}
+
+#[cfg(test)]
+pub(crate) fn test_log_grpc_unary_with_latency(latency: Duration) -> LogFields {
+    use std::sync::mpsc::sync_channel;
+
+    let (sender, receiver) = sync_channel(1);
+    let logger = Arc::new(crate::logger::test_logger_with_sender(sender));
+    let ctx = GrpcContext {
+        request_id: "latency-unary".into(),
+        logger,
+        client_log: Arc::new(Mutex::new(Vec::new())),
+    };
+    let metadata = MetadataMap::new();
+
+    log_grpc_unary(
+        &ctx,
+        "/test.Service/Latency",
+        &metadata,
+        "",
+        Code::Ok,
+        None,
+        Local::now(),
+        latency,
+        LogFields::new(),
+        String::new(),
+        LogFields::new(),
+        String::new(),
+    );
+
+    receiver.recv_timeout(Duration::from_secs(1)).unwrap()
+}
+
+#[cfg(test)]
+pub(crate) fn test_log_grpc_stream_with_latency(latency: Duration) -> LogFields {
+    use std::sync::mpsc::sync_channel;
+
+    let (sender, receiver) = sync_channel(1);
+    let logger = Arc::new(crate::logger::test_logger_with_sender(sender));
+    let ctx = GrpcContext {
+        request_id: "latency-stream".into(),
+        logger,
+        client_log: Arc::new(Mutex::new(Vec::new())),
+    };
+    let metadata = MetadataMap::new();
+
+    log_grpc_stream(
+        &ctx,
+        "/test.Service/LatencyStream",
+        &metadata,
+        "",
+        Code::Ok,
+        None,
+        Local::now(),
+        latency,
+        LogFields::new(),
+        String::new(),
+        false,
+        false,
+    );
+
+    receiver.recv_timeout(Duration::from_secs(1)).unwrap()
 }
 
 // Helper type so we can use the same capture code for Request and Response.

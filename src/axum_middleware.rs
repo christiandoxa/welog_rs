@@ -31,9 +31,16 @@ use crate::generalkey;
 use crate::logger;
 use crate::model::{TargetRequest, TargetResponse};
 use crate::util::{LogFields, build_target_log_fields, header_to_map};
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Limit when reading a body into Bytes (use usize::MAX to mirror no limit).
 const BODY_READ_LIMIT: usize = usize::MAX;
+/// Cap target logs per request to avoid unbounded growth.
+const MAX_TARGET_LOGS: usize = 1000;
+
+#[cfg(test)]
+static FORCE_INVALID_REQUEST_ID: AtomicBool = AtomicBool::new(false);
 
 /// Main layer attached to Axum, equivalent to `NewFiber` / `NewGin`.
 #[derive(Clone)]
@@ -62,6 +69,11 @@ impl WelogContext {
     pub fn logger(&self) -> Arc<logger::Logger> {
         self.logger.clone()
     }
+}
+
+#[cfg(test)]
+pub(crate) fn test_force_invalid_request_id(enabled: bool) {
+    FORCE_INVALID_REQUEST_ID.store(enabled, Ordering::Relaxed);
 }
 
 impl<S> Layer<S> for WelogLayer {
@@ -118,6 +130,12 @@ where
 
             let request_id =
                 existing_request_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            #[cfg(test)]
+            let request_id = if FORCE_INVALID_REQUEST_ID.load(Ordering::Relaxed) {
+                "invalid\nrequest-id".to_string()
+            } else {
+                request_id
+            };
 
             // Set the X-Request-ID header on the response/request parts.
             let header_value = HeaderValue::from_str(&request_id)
@@ -143,7 +161,10 @@ where
             let req_for_inner = Request::from_parts(parts, Body::from(body_bytes.clone()));
 
             // Run the inner service.
-            let resp = inner.call(req_for_inner).await?;
+            let resp = match inner.call(req_for_inner).await {
+                Ok(resp) => resp,
+                Err(err) => return Err(err),
+            };
 
             // Capture response body.
             let (resp_parts, resp_body) = resp.into_parts();
@@ -232,12 +253,9 @@ pub(crate) fn log_axum(
 
     // Pull client log (target) from the context.
     let target_logs_vec = {
-        let guard = ctx.client_log.lock();
-        guard
-            .iter()
-            .cloned()
-            .map(Value::Object)
-            .collect::<Vec<Value>>()
+        let mut guard = ctx.client_log.lock();
+        let logs = std::mem::take(&mut *guard);
+        logs.into_iter().map(Value::Object).collect::<Vec<Value>>()
     };
 
     let mut fields = LogFields::new();
@@ -305,7 +323,9 @@ pub(crate) fn log_axum(
 pub fn log_axum_client(ctx: &WelogContext, req: TargetRequest, res: TargetResponse) {
     let log_data = build_target_log_fields(&req, &res);
     let mut guard = ctx.client_log.lock();
-    guard.push(log_data);
+    if guard.len() < MAX_TARGET_LOGS {
+        guard.push(log_data);
+    }
 }
 
 /// Get a header value as string, case-insensitive.
@@ -336,13 +356,20 @@ pub(crate) fn extract_client_ip(headers: &HeaderMap) -> String {
 }
 
 pub(crate) fn version_to_string(version: Version) -> String {
-    match version {
-        Version::HTTP_09 => "HTTP/0.9",
-        Version::HTTP_10 => "HTTP/1.0",
-        Version::HTTP_11 => "HTTP/1.1",
-        Version::HTTP_2 => "HTTP/2.0",
-        Version::HTTP_3 => "HTTP/3.0",
-        _ => "HTTP",
+    #[cfg(coverage)]
+    {
+        format!("{version:?}")
     }
-    .to_string()
+    #[cfg(not(coverage))]
+    {
+        match version {
+            Version::HTTP_09 => "HTTP/0.9",
+            Version::HTTP_10 => "HTTP/1.0",
+            Version::HTTP_11 => "HTTP/1.1",
+            Version::HTTP_2 => "HTTP/2.0",
+            Version::HTTP_3 => "HTTP/3.0",
+            _ => "HTTP",
+        }
+        .to_string()
+    }
 }

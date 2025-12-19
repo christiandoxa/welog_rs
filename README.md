@@ -22,6 +22,7 @@ The logger reads the following variables:
 - `ELASTIC_URL__` – Elasticsearch base URL (e.g., `http://localhost:9200`)
 - `ELASTIC_USERNAME__` – Elasticsearch username
 - `ELASTIC_PASSWORD__` – Elasticsearch password
+- `WELOG_QUEUE_CAPACITY__` – max in-memory log queue size (default: `10000`)
 
 If any are missing/empty, logs are written to `logs.txt` in the working directory.
 

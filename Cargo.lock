@@ -1458,12 +1458,13 @@ dependencies = [
 
 [[package]]
 name = "welog_rs"
-version = "1.0.1"
+version = "1.0.1+patch"
 dependencies = [
  "axum",
  "base64",
  "bytes",
  "chrono",
+ "futures-core",
  "http",
  "once_cell",
  "parking_lot",
