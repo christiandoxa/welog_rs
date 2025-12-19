@@ -185,26 +185,26 @@ const GRPC_TEST_FORCE_ERROR: &str = "x-test-error";
 const GRPC_TEST_LOG_TARGET: &str = "x-test-log-target";
 
 async fn grpc_demo_handler(req: Request<DemoReq>) -> Result<Response<DemoRes>, tonic::Status> {
-    if req.metadata().get(GRPC_TEST_LOG_TARGET).is_some() {
-        if let Some(ctx) = req.extensions().get::<Arc<GrpcContext>>() {
-            log_grpc_client(
-                ctx,
-                TargetRequest {
-                    url: "https://example.com".into(),
-                    method: "GET".into(),
-                    content_type: "application/json".into(),
-                    header: Default::default(),
-                    body: br#"{"ping":"pong"}"#.to_vec(),
-                    timestamp: Local::now(),
-                },
-                TargetResponse {
-                    header: Default::default(),
-                    body: br#"{"ok":true}"#.to_vec(),
-                    status: 200,
-                    latency: Duration::from_millis(10),
-                },
-            );
-        }
+    if req.metadata().get(GRPC_TEST_LOG_TARGET).is_some()
+        && let Some(ctx) = req.extensions().get::<Arc<GrpcContext>>()
+    {
+        log_grpc_client(
+            ctx,
+            TargetRequest {
+                url: "https://example.com".into(),
+                method: "GET".into(),
+                content_type: "application/json".into(),
+                header: Default::default(),
+                body: br#"{"ping":"pong"}"#.to_vec(),
+                timestamp: Local::now(),
+            },
+            TargetResponse {
+                header: Default::default(),
+                body: br#"{"ok":true}"#.to_vec(),
+                status: 200,
+                latency: Duration::from_millis(10),
+            },
+        );
     }
 
     if req.metadata().get(GRPC_TEST_FORCE_ERROR).is_some() {

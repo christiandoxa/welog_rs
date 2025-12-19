@@ -156,7 +156,7 @@ impl Logger {
             }
             Err(TrySendError::Full(_)) => {
                 let dropped = self.inner.dropped_count.fetch_add(1, Ordering::Relaxed) + 1;
-                if dropped == 1 || dropped % 1000 == 0 {
+                if dropped == 1 || dropped.is_multiple_of(1000) {
                     eprintln!("welog_rs: log queue full; dropped {dropped} entries");
                 }
             }
