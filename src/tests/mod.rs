@@ -1238,48 +1238,60 @@ async fn welog_middleware_wraps_request_and_sets_request_id() {
     assert!(guard.request_id.as_ref().is_some_and(|v| !v.is_empty()));
 }
 
-#[tokio::test]
-async fn welog_middleware_preserves_existing_request_id() {
+#[test]
+fn welog_middleware_preserves_existing_request_id() {
     let _guard = AXUM_TEST_LOCK.lock().unwrap();
-    let (inner, state) = axum_test_service(AxumServiceMode::Ok {
-        status: StatusCode::OK,
-        body: AxumBodyKind::Static(b"ok"),
-    });
-    let mut svc = crate::axum_middleware::WelogLayer.layer(inner);
-
-    let req = http::Request::builder()
-        .method(Method::GET)
-        .uri("/demo")
-        .header("x-request-id", "existing-id")
-        .body(Body::empty())
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
         .unwrap();
+    rt.block_on(async {
+        let (inner, state) = axum_test_service(AxumServiceMode::Ok {
+            status: StatusCode::OK,
+            body: AxumBodyKind::Static(b"ok"),
+        });
+        let mut svc = crate::axum_middleware::WelogLayer.layer(inner);
 
-    let _resp = svc.ready().await.unwrap().call(req).await.unwrap();
+        let req = http::Request::builder()
+            .method(Method::GET)
+            .uri("/demo")
+            .header("x-request-id", "existing-id")
+            .body(Body::empty())
+            .unwrap();
 
-    let guard = state.lock().unwrap();
-    assert_eq!(guard.request_id.as_deref(), Some("existing-id"));
+        let _resp = svc.ready().await.unwrap().call(req).await.unwrap();
+
+        let guard = state.lock().unwrap();
+        assert_eq!(guard.request_id.as_deref(), Some("existing-id"));
+    });
 }
 
-#[tokio::test]
-async fn welog_middleware_handles_invalid_request_id() {
+#[test]
+fn welog_middleware_handles_invalid_request_id() {
     let _guard = AXUM_TEST_LOCK.lock().unwrap();
-    let (inner, state) = axum_test_service(AxumServiceMode::Ok {
-        status: StatusCode::OK,
-        body: AxumBodyKind::Static(b"ok"),
-    });
-    let mut svc = crate::axum_middleware::WelogLayer.layer(inner);
-    let req = http::Request::builder()
-        .method(Method::GET)
-        .uri("/demo")
-        .body(Body::empty())
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
         .unwrap();
+    rt.block_on(async {
+        let (inner, state) = axum_test_service(AxumServiceMode::Ok {
+            status: StatusCode::OK,
+            body: AxumBodyKind::Static(b"ok"),
+        });
+        let mut svc = crate::axum_middleware::WelogLayer.layer(inner);
+        let req = http::Request::builder()
+            .method(Method::GET)
+            .uri("/demo")
+            .body(Body::empty())
+            .unwrap();
 
-    test_force_invalid_request_id(true);
-    let _resp = svc.ready().await.unwrap().call(req).await.unwrap();
-    test_force_invalid_request_id(false);
+        test_force_invalid_request_id(true);
+        let _resp = svc.ready().await.unwrap().call(req).await.unwrap();
+        test_force_invalid_request_id(false);
 
-    let guard = state.lock().unwrap();
-    assert_eq!(guard.request_id.as_deref(), Some("invalid-request-id"));
+        let guard = state.lock().unwrap();
+        assert_eq!(guard.request_id.as_deref(), Some("invalid-request-id"));
+    });
 }
 
 #[tokio::test]
