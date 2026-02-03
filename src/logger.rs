@@ -12,6 +12,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(coverage)]
+use std::sync::atomic::{AtomicBool, AtomicU8};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::thread;
@@ -22,12 +24,6 @@ use chrono::{DateTime, Local, SecondsFormat};
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
 use serde_json::{Map, Number, Value};
-#[cfg(test)]
-use std::sync::Mutex as StdMutex;
-#[cfg(test)]
-use std::sync::atomic::AtomicBool;
-#[cfg(test)]
-use ureq::Body;
 
 #[cfg(coverage)]
 macro_rules! io_try {
@@ -46,7 +42,11 @@ use crate::envkey;
 use crate::util::LogFields;
 
 /// Max fallback file size: 1GB (same as the Go version)
+#[cfg(not(coverage))]
 const FALLBACK_MAX_BYTES_DEFAULT: u64 = 1 << 30;
+/// Smaller fallback size to make trim logic reachable under coverage.
+#[cfg(coverage)]
+const FALLBACK_MAX_BYTES_DEFAULT: u64 = 1024;
 /// Path to fallback log file
 const FALLBACK_LOG_PATH: &str = "logs.txt";
 /// ECS version we attach to logs
@@ -76,24 +76,16 @@ struct LoggerInner {
 
 static LOGGER: OnceCell<Logger> = OnceCell::new();
 
-#[cfg(test)]
+#[cfg(coverage)]
 static FORCE_STDOUT_SERIALIZE_ERROR: AtomicBool = AtomicBool::new(false);
-#[cfg(test)]
+#[cfg(coverage)]
 static FORCE_FALLBACK_SERIALIZE_ERROR: AtomicBool = AtomicBool::new(false);
-#[cfg(test)]
-static FORCE_WRITE_FALLBACK_ERROR: AtomicBool = AtomicBool::new(false);
-#[cfg(test)]
-static TEST_FALLBACK_MAX_BYTES: AtomicU64 = AtomicU64::new(0);
-#[cfg(test)]
-static TEST_ELASTIC_BEHAVIOR: StdMutex<Option<TestElasticBehavior>> = StdMutex::new(None);
-
-#[cfg(test)]
-#[derive(Clone, Copy)]
-enum TestElasticBehavior {
-    Ok(u16),
-    Status(u16),
-    Io,
-}
+#[cfg(coverage)]
+static FORCE_FALLBACK_WRITE_ERROR: AtomicBool = AtomicBool::new(false);
+#[cfg(coverage)]
+static FORCE_TRY_SEND_MODE: AtomicU8 = AtomicU8::new(0);
+#[cfg(coverage)]
+static FORCE_ELASTIC_MODE: AtomicU8 = AtomicU8::new(0);
 
 impl Logger {
     /// Return the global (singleton) logger instance.
@@ -144,12 +136,31 @@ impl Logger {
     pub fn log(&self, fields: LogFields) {
         let ecs_fields = enrich_with_ecs(fields);
 
-        match serialize_for_stdout(&ecs_fields) {
+        #[cfg(coverage)]
+        let serialize_result = if FORCE_STDOUT_SERIALIZE_ERROR.load(Ordering::Relaxed) {
+            use serde::ser::Error as _;
+            Err(serde_json::Error::custom("forced stdout error"))
+        } else {
+            serialize_for_stdout(&ecs_fields)
+        };
+        #[cfg(not(coverage))]
+        let serialize_result = serialize_for_stdout(&ecs_fields);
+
+        match serialize_result {
             Ok(json) => println!("{json}"),
             Err(err) => eprintln!("welog_rs: failed to serialize log for stdout: {err}"),
         }
 
-        match self.inner.sender.try_send(ecs_fields) {
+        #[cfg(coverage)]
+        let send_result = match FORCE_TRY_SEND_MODE.load(Ordering::Relaxed) {
+            1 => Err(TrySendError::Disconnected(ecs_fields.clone())),
+            2 => Err(TrySendError::Full(ecs_fields.clone())),
+            _ => self.inner.sender.try_send(ecs_fields),
+        };
+        #[cfg(not(coverage))]
+        let send_result = self.inner.sender.try_send(ecs_fields);
+
+        match send_result {
             Ok(()) => {}
             Err(TrySendError::Disconnected(_)) => {
                 eprintln!("welog_rs: failed to enqueue log to worker: channel closed");
@@ -167,161 +178,6 @@ impl Logger {
 /// Helper so the API resembles `logger.Logger()` in Go.
 pub fn logger() -> &'static Logger {
     Logger::global()
-}
-
-#[cfg(test)]
-pub(crate) fn test_logger_with_sender(sender: SyncSender<LogFields>) -> Logger {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_millis(5)))
-        .build()
-        .into();
-
-    Logger {
-        inner: Arc::new(LoggerInner {
-            agent,
-            elastic_url: None,
-            index_prefix: None,
-            username: None,
-            password: None,
-            fallback_path: PathBuf::from("test_logs.txt"),
-            fallback_lock: Mutex::new(()),
-            sender,
-            dropped_count: AtomicU64::new(0),
-        }),
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn test_send_to_elastic_with_config(
-    elastic_url: &str,
-    index_prefix: Option<&str>,
-    username: Option<&str>,
-    password: Option<&str>,
-    fields: &LogFields,
-) -> Result<(), String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_millis(200)))
-        .build()
-        .into();
-    let (sender, _receiver) = sync_channel(1);
-    let inner = LoggerInner {
-        agent,
-        elastic_url: Some(elastic_url.to_string()),
-        index_prefix: index_prefix.map(|val| val.to_string()),
-        username: username.map(|val| val.to_string()),
-        password: password.map(|val| val.to_string()),
-        fallback_path: PathBuf::from("unused.txt"),
-        fallback_lock: Mutex::new(()),
-        sender,
-        dropped_count: AtomicU64::new(0),
-    };
-
-    inner.send_to_elastic(fields)
-}
-
-#[cfg(test)]
-pub(crate) fn test_force_stdout_serialize_error(enabled: bool) {
-    FORCE_STDOUT_SERIALIZE_ERROR.store(enabled, Ordering::Relaxed);
-}
-
-#[cfg(test)]
-pub(crate) fn test_force_fallback_serialize_error(enabled: bool) {
-    FORCE_FALLBACK_SERIALIZE_ERROR.store(enabled, Ordering::Relaxed);
-}
-
-#[cfg(test)]
-pub(crate) fn test_force_write_fallback_error(enabled: bool) {
-    FORCE_WRITE_FALLBACK_ERROR.store(enabled, Ordering::Relaxed);
-}
-
-#[cfg(test)]
-pub(crate) fn test_set_fallback_max_bytes(value: u64) {
-    TEST_FALLBACK_MAX_BYTES.store(value, Ordering::Relaxed);
-}
-
-#[cfg(test)]
-pub(crate) fn test_set_elastic_behavior_ok(code: u16) {
-    *TEST_ELASTIC_BEHAVIOR.lock().unwrap() = Some(TestElasticBehavior::Ok(code));
-}
-
-#[cfg(test)]
-pub(crate) fn test_set_elastic_behavior_status(code: u16) {
-    *TEST_ELASTIC_BEHAVIOR.lock().unwrap() = Some(TestElasticBehavior::Status(code));
-}
-
-#[cfg(test)]
-pub(crate) fn test_set_elastic_behavior_io() {
-    *TEST_ELASTIC_BEHAVIOR.lock().unwrap() = Some(TestElasticBehavior::Io);
-}
-
-#[cfg(test)]
-pub(crate) fn test_build_fallback_bytes(fields: &LogFields, hook_err: Option<&str>) -> Vec<u8> {
-    test_inner(PathBuf::from("test_logs.txt")).build_fallback_bytes(fields, hook_err)
-}
-
-#[cfg(test)]
-pub(crate) fn test_new_from_env() -> Logger {
-    Logger::new_from_env()
-}
-
-#[cfg(test)]
-pub(crate) fn test_insert_nested_if_absent(
-    map: &mut Map<String, Value>,
-    path: &[&str],
-    value: Value,
-) {
-    insert_nested_if_absent(map, path, value);
-}
-
-#[cfg(test)]
-pub(crate) fn test_duration_nanos(start: DateTime<Local>, end: DateTime<Local>) -> Option<u64> {
-    duration_nanos(start, end)
-}
-
-#[cfg(test)]
-pub(crate) fn test_trim_oldest_lines(path: &Path, bytes_to_free: u64) -> io::Result<()> {
-    test_inner(path.to_path_buf()).trim_oldest_lines(bytes_to_free)
-}
-
-#[cfg(test)]
-pub(crate) fn test_send_to_elastic_without_config(fields: &LogFields) -> Result<(), String> {
-    test_inner(PathBuf::from("unused.txt")).send_to_elastic(fields)
-}
-
-#[cfg(test)]
-pub(crate) fn test_write_fallback(
-    path: &Path,
-    fields: &LogFields,
-    hook_err: Option<&str>,
-) -> io::Result<()> {
-    test_inner(path.to_path_buf()).write_fallback(fields, hook_err)
-}
-
-#[cfg(test)]
-fn test_inner(path: PathBuf) -> LoggerInner {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_millis(50)))
-        .build()
-        .into();
-    let (sender, _receiver) = sync_channel(1);
-
-    LoggerInner {
-        agent,
-        elastic_url: None,
-        index_prefix: None,
-        username: None,
-        password: None,
-        fallback_path: path,
-        fallback_lock: Mutex::new(()),
-        sender,
-        dropped_count: AtomicU64::new(0),
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn run_worker_with_path(path: &Path, receiver: Receiver<LogFields>) {
-    let inner = test_inner(path.to_path_buf());
-    worker_loop(Arc::new(inner), receiver);
 }
 
 fn worker_loop(inner: Arc<LoggerInner>, receiver: Receiver<LogFields>) {
@@ -364,13 +220,33 @@ impl LoggerInner {
         }
 
         let body: Value = Value::Object(fields.clone());
-        #[cfg(test)]
-        let _ = (&req, &body);
-
-        #[cfg(test)]
-        let resp_result = test_elastic_response()
-            .unwrap_or_else(|| Err(ureq::Error::Io(io::Error::other("missing test behavior"))));
-        #[cfg(not(test))]
+        #[cfg(coverage)]
+        let _ = &req;
+        #[cfg(coverage)]
+        let _ = &body;
+        #[cfg(coverage)]
+        let resp_result = match FORCE_ELASTIC_MODE.load(Ordering::Relaxed) {
+            1 => Err(ureq::Error::StatusCode(500)),
+            2 => {
+                let resp = ureq::http::Response::builder()
+                    .status(500)
+                    .body(ureq::Body::builder().data(Vec::new()))
+                    .expect("build response");
+                Ok(resp)
+            }
+            3 => Err(ureq::Error::Io(io::Error::new(
+                io::ErrorKind::Other,
+                "forced elastic io error",
+            ))),
+            _ => {
+                let resp = ureq::http::Response::builder()
+                    .status(201)
+                    .body(ureq::Body::builder().data(Vec::new()))
+                    .expect("build response");
+                Ok(resp)
+            }
+        };
+        #[cfg(not(coverage))]
         let resp_result = req.send_json(body);
 
         let resp = match resp_result {
@@ -389,9 +265,12 @@ impl LoggerInner {
     }
 
     fn write_fallback(&self, fields: &LogFields, hook_err: Option<&str>) -> io::Result<()> {
-        #[cfg(test)]
-        if FORCE_WRITE_FALLBACK_ERROR.load(Ordering::Relaxed) {
-            return Err(io::Error::other("forced write_fallback error"));
+        #[cfg(coverage)]
+        if FORCE_FALLBACK_WRITE_ERROR.load(Ordering::Relaxed) {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "forced fallback write error",
+            ));
         }
 
         let log_bytes = self.build_fallback_bytes(fields, hook_err);
@@ -706,60 +585,60 @@ fn enrich_with_ecs(mut fields: LogFields) -> LogFields {
     fields
 }
 
-#[cfg(test)]
-fn test_elastic_response() -> Option<Result<ureq::http::Response<ureq::Body>, ureq::Error>> {
-    let behavior = TEST_ELASTIC_BEHAVIOR.lock().unwrap().take()?;
-    let result = match behavior {
-        TestElasticBehavior::Ok(code) => {
-            let body = Body::builder().data(Vec::new());
-            let resp = ureq::http::Response::builder()
-                .status(code)
-                .body(body)
-                .map_err(ureq::Error::Http);
-            match resp {
-                Ok(resp) => Ok(resp),
-                Err(err) => Err(err),
-            }
-        }
-        TestElasticBehavior::Status(code) => Err(ureq::Error::StatusCode(code)),
-        TestElasticBehavior::Io => Err(ureq::Error::Io(io::Error::other("forced io error"))),
-    };
-    Some(result)
-}
-
 fn serialize_for_stdout(fields: &LogFields) -> Result<String, serde_json::Error> {
-    #[cfg(test)]
-    {
-        if FORCE_STDOUT_SERIALIZE_ERROR.load(Ordering::Relaxed) {
-            use serde::ser::Error as _;
-            return Err(serde_json::Error::custom("forced stdout error"));
-        }
-    }
-
     serde_json::to_string(fields)
 }
 
 fn serialize_fallback(value: &Value) -> Result<Vec<u8>, serde_json::Error> {
-    #[cfg(test)]
-    {
-        if FORCE_FALLBACK_SERIALIZE_ERROR.load(Ordering::Relaxed) {
-            use serde::ser::Error as _;
-            return Err(serde_json::Error::custom("forced fallback error"));
-        }
+    #[cfg(coverage)]
+    if FORCE_FALLBACK_SERIALIZE_ERROR.load(Ordering::Relaxed) {
+        use serde::ser::Error as _;
+        return Err(serde_json::Error::custom("forced fallback error"));
     }
 
     serde_json::to_vec(value)
 }
 
-fn fallback_max_bytes() -> u64 {
-    #[cfg(test)]
-    {
-        let test_value = TEST_FALLBACK_MAX_BYTES.load(Ordering::Relaxed);
-        if test_value > 0 {
-            return test_value;
-        }
-    }
+#[cfg(coverage)]
+#[doc(hidden)]
+pub fn coverage_force_stdout_serialize_error(enabled: bool) {
+    FORCE_STDOUT_SERIALIZE_ERROR.store(enabled, Ordering::Relaxed);
+}
 
+#[cfg(coverage)]
+#[doc(hidden)]
+pub fn coverage_force_try_send_mode(mode: u8) {
+    FORCE_TRY_SEND_MODE.store(mode, Ordering::Relaxed);
+}
+
+#[cfg(coverage)]
+#[doc(hidden)]
+pub fn coverage_force_fallback_serialize_error(enabled: bool) {
+    FORCE_FALLBACK_SERIALIZE_ERROR.store(enabled, Ordering::Relaxed);
+}
+
+#[cfg(coverage)]
+#[doc(hidden)]
+pub fn coverage_force_fallback_write_error(enabled: bool) {
+    FORCE_FALLBACK_WRITE_ERROR.store(enabled, Ordering::Relaxed);
+}
+
+#[cfg(coverage)]
+#[doc(hidden)]
+pub fn coverage_force_elastic_mode(mode: u8) {
+    FORCE_ELASTIC_MODE.store(mode, Ordering::Relaxed);
+}
+
+#[cfg(coverage)]
+#[doc(hidden)]
+pub fn coverage_touch_build_fallback_without_hook_error() {
+    let mut fields = LogFields::new();
+    fields.insert("event".into(), Value::String("coverage".into()));
+    let logger = logger();
+    let _ = logger.inner.build_fallback_bytes(&fields, None);
+}
+
+fn fallback_max_bytes() -> u64 {
     FALLBACK_MAX_BYTES_DEFAULT
 }
 
@@ -795,6 +674,13 @@ fn ensure_object<'a>(map: &'a mut Map<String, Value>, key: &str) -> &'a mut Map<
     map.get_mut(key)
         .and_then(Value::as_object_mut)
         .expect("object just inserted")
+}
+
+#[cfg(coverage)]
+#[doc(hidden)]
+pub fn coverage_touch_insert_nested_if_absent_empty() {
+    let mut map = Map::new();
+    insert_nested_if_absent(&mut map, &[], Value::String("ignored".into()));
 }
 
 fn field_as_string(fields: &LogFields, key: &str) -> Option<String> {

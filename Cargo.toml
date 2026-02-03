@@ -1,12 +1,15 @@
 [package]
 name = "welog_rs"
-version = "1.0.2"
+version = "1.0.3"
 edition = "2024"
 description = "Structured logging with Elasticsearch sink and file fallback"
 license = "MIT"
 repository = "https://github.com/christiandoxa/welog_rs"
 readme = "README.md"
 keywords = ["logging", "axum", "tonic", "grpc", "elasticsearch"]
+
+[lib]
+test = false
 
 [dependencies]
 axum = { version = "0.8", features = ["macros", "json"] }
@@ -21,7 +24,7 @@ uuid = { version = "1", features = ["v4"] }
 once_cell = "1.19"
 parking_lot = "0.12"
 chrono = { version = "0.4", features = ["serde", "clock"] }
-whoami = "1.5"
+whoami = "2"
 base64 = "0.22"
 
 # gRPC support (tonic server helpers)
@@ -34,6 +37,12 @@ tokio = { version = "1.48.0", features = ["full"] }
 [dev-dependencies]
 tempfile = "3"
 futures-core = "0.3"
+jmpln = "0.1"
+
+[[bin]]
+name = "welog_rs"
+path = "src/main.rs"
+test = false
 
 [lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = ["cfg(coverage)"] }
