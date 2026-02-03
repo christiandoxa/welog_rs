@@ -10,12 +10,9 @@
 //
 // Rust edition in Cargo.toml: edition = "2024"
 
-use std::{net::SocketAddr, sync::Arc};
+use std::net::SocketAddr;
 
-use axum::{Json, Router, extract::Extension, routing::get};
-use serde_json::{Value, json};
-
-use welog_rs::{Config, WelogContext, WelogLayer, set_config};
+use welog_rs::{Config, app::build_app, set_config};
 
 #[tokio::main]
 async fn main() {
@@ -32,10 +29,10 @@ async fn main() {
 
     // Axum router with one endpoint:
     // - GET / -> basic hello + request_id
-    let _app: Router = Router::new()
-        .route("/", get(root_handler))
-        // Attach WelogLayer at the outermost level
-        .layer(WelogLayer);
+    let app = build_app();
+
+    #[cfg(coverage)]
+    let _ = &app;
 
     let addr: SocketAddr = "0.0.0.0:3000".parse().expect("alamat tidak valid");
     println!("Server running on http://{}", addr);
@@ -47,14 +44,4 @@ async fn main() {
     axum::serve(tokio::net::TcpListener::bind(addr).await.unwrap(), app)
         .await
         .unwrap();
-}
-
-/// Root handler: return simple JSON plus request_id from WelogContext.
-async fn root_handler(Extension(ctx): Extension<Arc<WelogContext>>) -> Json<Value> {
-    let payload = json!({
-        "message": "hello from welog_rs",
-        "request_id": ctx.request_id(),
-    });
-
-    Json(payload)
 }

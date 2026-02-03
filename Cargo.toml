@@ -42,7 +42,6 @@ jmpln = "0.1"
 [[bin]]
 name = "welog_rs"
 path = "src/main.rs"
-test = false
 
 [lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = ["cfg(coverage)"] }

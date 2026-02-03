@@ -125,12 +125,16 @@ where
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string());
 
-            let mut request_id =
+            let request_id =
                 existing_request_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             #[cfg(coverage)]
-            if FORCE_INVALID_REQUEST_ID.load(Ordering::Relaxed) {
-                request_id = "invalid\nrequest-id".to_string();
-            }
+            let request_id = {
+                let mut request_id = request_id;
+                if FORCE_INVALID_REQUEST_ID.load(Ordering::Relaxed) {
+                    request_id = "invalid\nrequest-id".to_string();
+                }
+                request_id
+            };
             // Set the X-Request-ID header on the response/request parts.
             let header_value = HeaderValue::from_str(&request_id)
                 .unwrap_or_else(|_| HeaderValue::from_static("invalid-request-id"));

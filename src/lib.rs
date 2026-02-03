@@ -8,6 +8,7 @@
 //! - Axum middleware similar to Fiber/Gin middleware: request/response logging + target (client log)
 //! - Helper for HTTP client (target) logging similar to `LogFiberClient` / `LogGinClient`
 
+pub mod app;
 pub mod axum_middleware;
 pub mod config;
 pub mod envkey;
