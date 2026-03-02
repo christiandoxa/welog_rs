@@ -295,7 +295,7 @@ fn response_time_from_latency(
     request_time: &DateTime<Local>,
     latency: Duration,
 ) -> DateTime<Local> {
-    request_time.clone() + chrono_duration_from_std(latency)
+    *request_time + chrono_duration_from_std(latency)
 }
 
 #[cfg(coverage)]
@@ -661,19 +661,15 @@ fn request_id_metadata_key() -> MetadataKey<Ascii> {
 
 fn set_request_id_common(md: &mut MetadataMap, request_id: &str, header_bytes: &[u8]) {
     let key = request_id_metadata_key();
-    let value;
-    match MetadataValue::try_from(request_id) {
-        Ok(parsed) => value = parsed,
+    let value = match MetadataValue::try_from(request_id) {
+        Ok(parsed) => parsed,
         Err(_) => return,
-    }
+    };
 
     md.insert(key, value.clone());
 
-    match MetadataKey::<Ascii>::from_bytes(header_bytes) {
-        Ok(header_key) => {
-            md.insert(header_key, value);
-        }
-        Err(_) => {}
+    if let Ok(header_key) = MetadataKey::<Ascii>::from_bytes(header_bytes) {
+        md.insert(header_key, value);
     }
 }
 

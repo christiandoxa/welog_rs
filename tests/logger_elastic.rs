@@ -37,24 +37,31 @@ fn read_request(stream: &mut TcpStream) -> String {
         }
         buf.extend_from_slice(&tmp[..n]);
 
-        if header_end.is_none() {
-            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                header_end = Some(pos + 4);
-                let headers = String::from_utf8_lossy(&buf[..pos + 4]);
-                for line in headers.lines() {
-                    if let Some(value) = line.strip_prefix("Content-Length:") {
-                        if let Ok(len) = value.trim().parse::<usize>() {
-                            content_len = Some(len);
-                        }
-                    }
+        if header_end.is_none()
+            && let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n")
+        {
+            header_end = Some(pos + 4);
+            let headers = String::from_utf8_lossy(&buf[..pos + 4]);
+            for line in headers.lines() {
+                let mut parts = line.splitn(2, ':');
+                let Some(name) = parts.next() else {
+                    continue;
+                };
+                let Some(value) = parts.next() else {
+                    continue;
+                };
+                if name.trim().eq_ignore_ascii_case("Content-Length")
+                    && let Ok(len) = value.trim().parse::<usize>()
+                {
+                    content_len = Some(len);
                 }
             }
         }
 
-        if let (Some(end), Some(len)) = (header_end, content_len) {
-            if buf.len() >= end + len {
-                break;
-            }
+        if let (Some(end), Some(len)) = (header_end, content_len)
+            && buf.len() >= end + len
+        {
+            break;
         }
     }
 
@@ -68,12 +75,20 @@ fn init_env() {
         let addr = listener.local_addr().unwrap();
         SERVER_ADDR.set(format!("http://{}", addr)).unwrap();
 
+        unsafe {
+            std::env::set_var("ELASTIC_URL__", SERVER_ADDR.get().unwrap());
+            std::env::set_var("ELASTIC_INDEX__", "welog");
+            std::env::set_var("ELASTIC_USERNAME__", "user");
+            std::env::set_var("ELASTIC_PASSWORD__", "pass");
+        }
+
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let mut stream = match stream {
                     Ok(stream) => stream,
                     Err(_) => continue,
                 };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
 
                 REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
 
@@ -100,13 +115,6 @@ fn init_env() {
                 let _ = stream.flush();
             }
         });
-
-        unsafe {
-            std::env::set_var("ELASTIC_URL__", SERVER_ADDR.get().unwrap());
-            std::env::set_var("ELASTIC_INDEX__", "welog");
-            std::env::set_var("ELASTIC_USERNAME__", "user");
-            std::env::set_var("ELASTIC_PASSWORD__", "pass");
-        }
 
         let _ = logger::logger();
     });
@@ -155,7 +163,7 @@ fn wait_for_request() {
 #[cfg(not(coverage))]
 #[test]
 fn send_to_elastic_success() {
-    let _guard = PATCH_LOCK.lock().unwrap();
+    let _guard = PATCH_LOCK.lock().unwrap_or_else(|err| err.into_inner());
     init_env();
     REQUEST_COUNT.store(0, Ordering::Relaxed);
     DROP_CONN.store(false, Ordering::Relaxed);
@@ -167,7 +175,7 @@ fn send_to_elastic_success() {
 #[cfg(not(coverage))]
 #[test]
 fn send_to_elastic_status_error() {
-    let _guard = PATCH_LOCK.lock().unwrap();
+    let _guard = PATCH_LOCK.lock().unwrap_or_else(|err| err.into_inner());
     init_env();
     REQUEST_COUNT.store(0, Ordering::Relaxed);
     DROP_CONN.store(false, Ordering::Relaxed);
@@ -179,7 +187,7 @@ fn send_to_elastic_status_error() {
 #[cfg(not(coverage))]
 #[test]
 fn send_to_elastic_io_error() {
-    let _guard = PATCH_LOCK.lock().unwrap();
+    let _guard = PATCH_LOCK.lock().unwrap_or_else(|err| err.into_inner());
     init_env();
     REQUEST_COUNT.store(0, Ordering::Relaxed);
     DROP_CONN.store(true, Ordering::Relaxed);
@@ -191,7 +199,7 @@ fn send_to_elastic_io_error() {
 #[cfg(not(coverage))]
 #[test]
 fn send_to_elastic_non_success_response() {
-    let _guard = PATCH_LOCK.lock().unwrap();
+    let _guard = PATCH_LOCK.lock().unwrap_or_else(|err| err.into_inner());
     init_env();
     REQUEST_COUNT.store(0, Ordering::Relaxed);
     DROP_CONN.store(false, Ordering::Relaxed);

@@ -9,8 +9,6 @@ use serde_json::{Value, json};
 use tonic::service::Interceptor;
 use tonic::{Request, Response};
 use tower::{Layer, Service, ServiceExt};
-use whoami;
-
 use welog_rs::axum_middleware::{WelogContext, WelogLayer, log_axum_client};
 use welog_rs::envkey;
 use welog_rs::grpc::{GrpcContext, WelogGrpcInterceptor, with_grpc_unary_logging};
@@ -95,26 +93,24 @@ impl Service<http::Request<Body>> for AxumTestService {
                 .map(|ctx| ctx.request_id().to_string());
             let has_context = context_request_id.is_some();
 
-            if log_target {
-                if let Some(ctx) = parts.extensions.get::<Arc<WelogContext>>() {
-                    log_axum_client(
-                        ctx,
-                        TargetRequest {
-                            url: "https://example.com".into(),
-                            method: "GET".into(),
-                            content_type: "application/json".into(),
-                            header: Default::default(),
-                            body: br#"{"ping":"pong"}"#.to_vec(),
-                            timestamp: Local::now(),
-                        },
-                        TargetResponse {
-                            header: Default::default(),
-                            body: br#"{"ok":true}"#.to_vec(),
-                            status: 200,
-                            latency: Duration::from_millis(10),
-                        },
-                    );
-                }
+            if log_target && let Some(ctx) = parts.extensions.get::<Arc<WelogContext>>() {
+                log_axum_client(
+                    ctx,
+                    TargetRequest {
+                        url: "https://example.com".into(),
+                        method: "GET".into(),
+                        content_type: "application/json".into(),
+                        header: Default::default(),
+                        body: br#"{"ping":"pong"}"#.to_vec(),
+                        timestamp: Local::now(),
+                    },
+                    TargetResponse {
+                        header: Default::default(),
+                        body: br#"{"ok":true}"#.to_vec(),
+                        status: 200,
+                        latency: Duration::from_millis(10),
+                    },
+                );
             }
 
             let mut guard = state.lock().unwrap();
