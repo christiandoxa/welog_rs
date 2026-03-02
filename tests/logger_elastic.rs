@@ -1,5 +1,5 @@
 #[cfg(not(coverage))]
-use std::io::Read;
+use std::io::{Read, Write};
 #[cfg(not(coverage))]
 use std::net::{TcpListener, TcpStream};
 #[cfg(not(coverage))]

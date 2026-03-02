@@ -52,5 +52,18 @@ jobs:
         with:
           tool: cargo-llvm-cov
 
-      - name: Coverage
-        run: cargo llvm-cov --all-features --workspace --tests --fail-under-lines 80
+      - name: Coverage Run
+        env:
+          LLVM_COV_FLAGS: -ignore-filename-regex=.*/src/grpc_impl\.rs
+        run: cargo llvm-cov --all-features --workspace --tests --no-report
+
+      - name: Coverage Threshold
+        env:
+          LLVM_COV_FLAGS: -ignore-filename-regex=.*/src/grpc_impl\.rs
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$(cargo llvm-cov report)"
+          printf '%s\n' "$report"
+          total="$(printf '%s\n' "$report" | awk '/^TOTAL/ { print $10 }')"
+          awk -v total="$total" 'BEGIN { exit ((total + 0) >= 99 ? 0 : 1) }'

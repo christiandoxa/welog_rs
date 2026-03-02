@@ -13,3 +13,5 @@ logs.txt
 *.rs.bk
 
 coverage.out
+
+Cargo.lock

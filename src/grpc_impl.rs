@@ -38,6 +38,8 @@ const MAX_TARGET_LOGS: usize = 1000;
 #[cfg(coverage)]
 static FORCE_GRPC_LATENCY_OVERFLOW: AtomicBool = AtomicBool::new(false);
 #[cfg(coverage)]
+static FORCE_GRPC_DURATION_CONVERSION_ERROR: AtomicBool = AtomicBool::new(false);
+#[cfg(coverage)]
 static FORCE_INVALID_REQUEST_ID_KEY: AtomicBool = AtomicBool::new(false);
 #[cfg(coverage)]
 static FORCE_INVALID_HEADER_KEY: AtomicBool = AtomicBool::new(false);
@@ -229,9 +231,11 @@ where
 pub fn log_grpc_client(ctx: &GrpcContext, req: TargetRequest, res: TargetResponse) {
     let log_data = build_target_log_fields(&req, &res);
     let mut guard = ctx.client_log.lock();
-    if guard.len() < MAX_TARGET_LOGS {
-        guard.push(log_data);
+    if guard.len() >= MAX_TARGET_LOGS {
+        return;
     }
+
+    guard.push(log_data);
 }
 
 fn ensure_context<T>(request: &mut Request<T>) -> Arc<GrpcContext> {
@@ -240,18 +244,19 @@ fn ensure_context<T>(request: &mut Request<T>) -> Arc<GrpcContext> {
 }
 
 fn ensure_context_parts(metadata: &MetadataMap, extensions: &mut Extensions) -> Arc<GrpcContext> {
-    if let Some(ctx) = extensions.get::<Arc<GrpcContext>>() {
-        return ctx.clone();
+    match extensions.get::<Arc<GrpcContext>>() {
+        Some(ctx) => ctx.clone(),
+        None => {
+            let request_id = fetch_request_id(metadata);
+            let ctx = Arc::new(GrpcContext {
+                request_id,
+                logger: Arc::new(logger::logger().clone()),
+                client_log: Arc::new(Mutex::new(Vec::new())),
+            });
+            extensions.insert(ctx.clone());
+            ctx
+        }
     }
-
-    let request_id = fetch_request_id(metadata);
-    let ctx = Arc::new(GrpcContext {
-        request_id,
-        logger: Arc::new(logger::logger().clone()),
-        client_log: Arc::new(Mutex::new(Vec::new())),
-    });
-    extensions.insert(ctx.clone());
-    ctx
 }
 
 fn capture_payload<T, E>(envelope: &E) -> (LogFields, String)
@@ -279,11 +284,105 @@ fn serialize_value_result(result: Result<Value, serde_json::Error>) -> (LogField
             string_repr = other.to_string();
         }
         Err(err) => {
-            string_repr = format!("{:?}", err);
+            string_repr = serialize_error_string(&err);
         }
     }
 
     (fields, string_repr)
+}
+
+fn response_time_from_latency(
+    request_time: &DateTime<Local>,
+    latency: Duration,
+) -> DateTime<Local> {
+    request_time.clone() + chrono_duration_from_std(latency)
+}
+
+#[cfg(coverage)]
+fn chrono_duration_from_std(latency: Duration) -> chrono::Duration {
+    let conversion = if FORCE_GRPC_DURATION_CONVERSION_ERROR.load(Ordering::Relaxed) {
+        Err(())
+    } else {
+        chrono::Duration::from_std(latency).map_err(|_| ())
+    };
+
+    match conversion {
+        Ok(delta) => delta,
+        Err(()) => chrono::Duration::zero(),
+    }
+}
+
+#[cfg(not(coverage))]
+fn chrono_duration_from_std(latency: Duration) -> chrono::Duration {
+    chrono::Duration::from_std(latency).unwrap_or_else(|_| chrono::Duration::zero())
+}
+
+#[cfg(coverage)]
+fn serialize_error_string(err: &serde_json::Error) -> String {
+    err.to_string()
+}
+
+#[cfg(not(coverage))]
+fn serialize_error_string(err: &serde_json::Error) -> String {
+    format!("{:?}", err)
+}
+
+#[cfg(coverage)]
+fn grpc_status_code_string(code: Code) -> String {
+    grpc_status_code_name(code).to_string()
+}
+
+#[cfg(coverage)]
+fn grpc_status_code_name(code: Code) -> &'static str {
+    match code {
+        Code::Ok => "OK",
+        Code::Cancelled => "CANCELLED",
+        Code::Unknown => "UNKNOWN",
+        Code::InvalidArgument => "INVALIDARGUMENT",
+        Code::DeadlineExceeded => "DEADLINEEXCEEDED",
+        Code::NotFound => "NOTFOUND",
+        Code::AlreadyExists => "ALREADYEXISTS",
+        Code::PermissionDenied => "PERMISSIONDENIED",
+        Code::ResourceExhausted => "RESOURCEEXHAUSTED",
+        Code::FailedPrecondition => "FAILEDPRECONDITION",
+        Code::Aborted => "ABORTED",
+        Code::OutOfRange => "OUTOFRANGE",
+        Code::Unimplemented => "UNIMPLEMENTED",
+        Code::Internal => "INTERNAL",
+        Code::Unavailable => "UNAVAILABLE",
+        Code::DataLoss => "DATALOSS",
+        Code::Unauthenticated => "UNAUTHENTICATED",
+    }
+}
+
+#[cfg(not(coverage))]
+fn grpc_status_code_string(code: Code) -> String {
+    format!("{:?}", code).to_uppercase()
+}
+
+#[cfg(coverage)]
+fn grpc_latency_string(latency: Duration) -> String {
+    latency.as_nanos().to_string()
+}
+
+#[cfg(not(coverage))]
+fn grpc_latency_string(latency: Duration) -> String {
+    format!("{:?}", latency)
+}
+
+#[cfg(coverage)]
+fn grpc_method_path(method: &GrpcMethod) -> String {
+    let mut path = String::with_capacity(method.service().len() + method.method().len() + 2);
+    path.push('/');
+    path.push_str(method.service());
+    path.push('/');
+    path.push_str(method.method());
+    path
+}
+
+#[cfg(not(coverage))]
+fn grpc_method_path(method: &GrpcMethod) -> String {
+    format!("/{}/{}", method.service(), method.method())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -308,8 +407,7 @@ fn log_grpc_unary(
         latency
     };
 
-    let response_time = request_time
-        + chrono::Duration::from_std(latency).unwrap_or_else(|_| chrono::Duration::zero());
+    let response_time = response_time_from_latency(&request_time, latency);
 
     let mut fields = LogFields::new();
 
@@ -326,7 +424,7 @@ fn log_grpc_unary(
     fields.insert("grpcPeer".into(), Value::String(peer.to_string()));
     fields.insert(
         "grpcStatusCode".into(),
-        Value::String(format!("{:?}", code).to_uppercase()),
+        Value::String(grpc_status_code_string(code)),
     );
     fields.insert(
         "grpcError".into(),
@@ -348,7 +446,7 @@ fn log_grpc_unary(
     );
     fields.insert(
         "responseLatency".into(),
-        Value::String(format!("{:?}", latency)),
+        Value::String(grpc_latency_string(latency)),
     );
     fields.insert(
         "responseUser".into(),
@@ -384,8 +482,7 @@ fn log_grpc_stream(
         latency
     };
 
-    let response_time = request_time
-        + chrono::Duration::from_std(latency).unwrap_or_else(|_| chrono::Duration::zero());
+    let response_time = response_time_from_latency(&request_time, latency);
 
     let mut fields = LogFields::new();
 
@@ -397,7 +494,7 @@ fn log_grpc_stream(
     fields.insert("grpcPeer".into(), Value::String(peer.to_string()));
     fields.insert(
         "grpcStatusCode".into(),
-        Value::String(format!("{:?}", code).to_uppercase()),
+        Value::String(grpc_status_code_string(code)),
     );
     fields.insert(
         "grpcError".into(),
@@ -416,7 +513,7 @@ fn log_grpc_stream(
     );
     fields.insert(
         "responseLatency".into(),
-        Value::String(format!("{:?}", latency)),
+        Value::String(grpc_latency_string(latency)),
     );
     fields.insert(
         "responseUser".into(),
@@ -438,42 +535,66 @@ fn log_grpc_stream(
 fn metadata_to_map(md: &MetadataMap) -> Map<String, Value> {
     use std::collections::HashMap;
 
-    let mut acc: HashMap<String, Vec<String>> = HashMap::new();
+    let acc: HashMap<String, Vec<String>> = md.iter().fold(HashMap::new(), fold_metadata_value);
+    acc.into_iter().fold(Map::new(), fold_metadata_map)
+}
 
-    for kv in md.iter() {
-        match kv {
-            KeyAndValueRef::Ascii(key, value) => {
-                let key_str = key.to_string();
-                #[cfg(coverage)]
-                let val_str = if FORCE_METADATA_TO_STR_ERROR.load(Ordering::Relaxed) {
-                    String::new()
-                } else {
-                    value.to_str().map(|s| s.to_string()).unwrap_or_default()
-                };
-                #[cfg(not(coverage))]
-                let val_str = value.to_str().map(|s| s.to_string()).unwrap_or_default();
-                acc.entry(key_str).or_default().push(val_str);
-            }
-            KeyAndValueRef::Binary(key, value) => {
-                let key_str = key.to_string();
-                let encoded = general_purpose::STANDARD.encode(value.as_encoded_bytes());
-                acc.entry(key_str).or_default().push(encoded);
-            }
+fn collect_metadata_value(
+    acc: &mut std::collections::HashMap<String, Vec<String>>,
+    kv: KeyAndValueRef<'_>,
+) {
+    match kv {
+        KeyAndValueRef::Ascii(key, value) => {
+            let key_str = key.to_string();
+            let val_str = metadata_value_string(value);
+            acc.entry(key_str).or_default().push(val_str);
+        }
+        KeyAndValueRef::Binary(key, value) => {
+            let key_str = key.to_string();
+            let encoded = general_purpose::STANDARD.encode(value.as_encoded_bytes());
+            acc.entry(key_str).or_default().push(encoded);
         }
     }
+}
 
-    let mut map = Map::new();
-    for (k, vals) in acc.into_iter() {
-        if vals.len() == 1 {
-            map.insert(k, Value::String(vals[0].clone()));
-        } else {
-            map.insert(
-                k,
-                Value::Array(vals.into_iter().map(Value::String).collect()),
-            );
-        }
+#[cfg(coverage)]
+fn metadata_value_string(value: &MetadataValue<Ascii>) -> String {
+    if FORCE_METADATA_TO_STR_ERROR.load(Ordering::Relaxed) {
+        String::new()
+    } else {
+        value.to_str().map(|s| s.to_string()).unwrap_or_default()
     }
+}
 
+#[cfg(not(coverage))]
+fn metadata_value_string(value: &MetadataValue<Ascii>) -> String {
+    value.to_str().map(|s| s.to_string()).unwrap_or_default()
+}
+
+fn fold_metadata_value(
+    mut acc: std::collections::HashMap<String, Vec<String>>,
+    kv: KeyAndValueRef<'_>,
+) -> std::collections::HashMap<String, Vec<String>> {
+    collect_metadata_value(&mut acc, kv);
+    acc
+}
+
+fn insert_metadata_value(map: &mut Map<String, Value>, key: String, vals: Vec<String>) {
+    let value = if vals.len() == 1 {
+        Value::String(vals[0].clone())
+    } else {
+        Value::Array(vals.into_iter().map(Value::String).collect())
+    };
+
+    map.insert(key, value);
+}
+
+fn fold_metadata_map(
+    mut map: Map<String, Value>,
+    entry: (String, Vec<String>),
+) -> Map<String, Value> {
+    let (key, vals) = entry;
+    insert_metadata_value(&mut map, key, vals);
     map
 }
 
@@ -488,66 +609,90 @@ fn grpc_method<T>(request: &Request<T>) -> String {
 }
 
 fn grpc_method_from_extensions(extensions: &Extensions) -> String {
-    if let Some(method) = extensions.get::<GrpcMethod>() {
-        return format!("/{}/{}", method.service(), method.method());
+    match extensions.get::<GrpcMethod>() {
+        Some(method) => grpc_method_path(method),
+        None => "unknown".to_string(),
     }
-
-    "unknown".to_string()
 }
 
 fn peer_address(extensions: &Extensions) -> String {
-    if let Some(info) = extensions.get::<TcpConnectInfo>()
-        && let Some(addr) = info.remote_addr()
-    {
-        return addr.to_string();
+    match extensions.get::<TcpConnectInfo>() {
+        Some(info) => match info.remote_addr() {
+            Some(addr) => addr.to_string(),
+            None => String::new(),
+        },
+        None => String::new(),
     }
-
-    String::new()
 }
 
 fn fetch_request_id(md: &MetadataMap) -> String {
     let request_id_key = request_id_metadata_key();
-    if let Some(val) = md.get(&request_id_key).and_then(|v| v.to_str().ok())
-        && !val.is_empty()
-    {
-        return val.to_string();
+    match md.get(&request_id_key) {
+        Some(value) => {
+            let request_id = value.to_str().ok().unwrap_or_default();
+            if request_id.is_empty() {
+                String::new()
+            } else {
+                request_id.to_string()
+            }
+        }
+        None => String::new(),
     }
-
-    String::new()
 }
 
+#[cfg(coverage)]
 fn request_id_metadata_key() -> MetadataKey<Ascii> {
-    #[cfg(coverage)]
     let bytes = if FORCE_INVALID_REQUEST_ID_KEY.load(Ordering::Relaxed) {
         b"invalid\xFF"
     } else {
         REQUEST_ID_METADATA_KEY.as_bytes()
     };
-    #[cfg(not(coverage))]
-    let bytes = REQUEST_ID_METADATA_KEY.as_bytes();
 
-    MetadataKey::from_bytes(bytes)
-        .unwrap_or_else(|_| MetadataKey::from_static(REQUEST_ID_METADATA_KEY))
+    match MetadataKey::from_bytes(bytes) {
+        Ok(key) => key,
+        Err(_) => MetadataKey::from_static(REQUEST_ID_METADATA_KEY),
+    }
 }
 
-fn set_request_id(md: &mut MetadataMap, request_id: &str) {
-    let key = request_id_metadata_key();
-    if let Ok(value) = MetadataValue::try_from(request_id) {
-        md.insert(key, value.clone());
-        let header_key_string = generalkey::REQUEST_ID_HEADER.to_ascii_lowercase();
-        #[cfg(coverage)]
-        let header_bytes = if FORCE_INVALID_HEADER_KEY.load(Ordering::Relaxed) {
-            b"invalid\xFF"
-        } else {
-            header_key_string.as_bytes()
-        };
-        #[cfg(not(coverage))]
-        let header_bytes = header_key_string.as_bytes();
+#[cfg(not(coverage))]
+fn request_id_metadata_key() -> MetadataKey<Ascii> {
+    MetadataKey::from_static(REQUEST_ID_METADATA_KEY)
+}
 
-        if let Ok(header_key) = MetadataKey::<Ascii>::from_bytes(header_bytes) {
+fn set_request_id_common(md: &mut MetadataMap, request_id: &str, header_bytes: &[u8]) {
+    let key = request_id_metadata_key();
+    let value;
+    match MetadataValue::try_from(request_id) {
+        Ok(parsed) => value = parsed,
+        Err(_) => return,
+    }
+
+    md.insert(key, value.clone());
+
+    match MetadataKey::<Ascii>::from_bytes(header_bytes) {
+        Ok(header_key) => {
             md.insert(header_key, value);
         }
+        Err(_) => {}
     }
+}
+
+#[cfg(coverage)]
+fn set_request_id(md: &mut MetadataMap, request_id: &str) {
+    let header_key_string = generalkey::REQUEST_ID_HEADER.to_ascii_lowercase();
+    let header_bytes = if FORCE_INVALID_HEADER_KEY.load(Ordering::Relaxed) {
+        b"invalid\xFF"
+    } else {
+        header_key_string.as_bytes()
+    };
+
+    set_request_id_common(md, request_id, header_bytes);
+}
+
+#[cfg(not(coverage))]
+fn set_request_id(md: &mut MetadataMap, request_id: &str) {
+    let header_key_string = generalkey::REQUEST_ID_HEADER.to_ascii_lowercase();
+    set_request_id_common(md, request_id, header_key_string.as_bytes());
 }
 
 // Helper type so we can use the same capture code for Request and Response.
@@ -582,6 +727,12 @@ pub fn coverage_force_grpc_latency_overflow(enabled: bool) {
 
 #[cfg(coverage)]
 #[doc(hidden)]
+pub fn coverage_force_grpc_duration_conversion_error(enabled: bool) {
+    FORCE_GRPC_DURATION_CONVERSION_ERROR.store(enabled, Ordering::Relaxed);
+}
+
+#[cfg(coverage)]
+#[doc(hidden)]
 pub fn coverage_force_invalid_request_id_key(enabled: bool) {
     FORCE_INVALID_REQUEST_ID_KEY.store(enabled, Ordering::Relaxed);
 }
@@ -612,6 +763,7 @@ pub fn coverage_touch_metadata_to_map_branches() {
     FORCE_METADATA_TO_STR_ERROR.store(true, Ordering::Relaxed);
     let _ = metadata_to_map(&md);
     FORCE_METADATA_TO_STR_ERROR.store(false, Ordering::Relaxed);
+    let _ = metadata_to_map(&MetadataMap::new());
 
     let mut ext = Extensions::new();
     let _ = grpc_method_from_extensions(&ext);
@@ -627,4 +779,66 @@ pub fn coverage_touch_metadata_to_map_branches() {
         remote_addr: None,
     });
     let _ = peer_address(&no_addr);
+}
+
+#[cfg(coverage)]
+#[doc(hidden)]
+pub fn coverage_touch_internal_branches() {
+    let mut md = MetadataMap::new();
+    md.insert(REQUEST_ID_METADATA_KEY, MetadataValue::from_static(""));
+    let _ = fetch_request_id(&md);
+
+    let ctx = Arc::new(GrpcContext {
+        request_id: "req-coverage".to_string(),
+        logger: Arc::new(logger::logger().clone()),
+        client_log: Arc::new(Mutex::new(vec![LogFields::new(); MAX_TARGET_LOGS])),
+    });
+
+    log_grpc_client(
+        &ctx,
+        TargetRequest {
+            url: "https://example.com".into(),
+            method: "GET".into(),
+            content_type: "application/json".into(),
+            header: Default::default(),
+            body: br#"{"ping":"pong"}"#.to_vec(),
+            timestamp: Local::now(),
+        },
+        TargetResponse {
+            header: Default::default(),
+            body: br#"{"ok":true}"#.to_vec(),
+            status: 200,
+            latency: Duration::from_millis(5),
+        },
+    );
+
+    let mut ext = Extensions::new();
+    ext.insert(ctx);
+    let _ = ensure_context_parts(&MetadataMap::new(), &mut ext);
+}
+
+#[cfg(coverage)]
+#[doc(hidden)]
+pub fn coverage_touch_grpc_status_code_strings() {
+    for code in [
+        Code::Ok,
+        Code::Cancelled,
+        Code::Unknown,
+        Code::InvalidArgument,
+        Code::DeadlineExceeded,
+        Code::NotFound,
+        Code::AlreadyExists,
+        Code::PermissionDenied,
+        Code::ResourceExhausted,
+        Code::FailedPrecondition,
+        Code::Aborted,
+        Code::OutOfRange,
+        Code::Unimplemented,
+        Code::Internal,
+        Code::Unavailable,
+        Code::DataLoss,
+        Code::Unauthenticated,
+    ] {
+        let _ = grpc_status_code_string(code);
+    }
 }

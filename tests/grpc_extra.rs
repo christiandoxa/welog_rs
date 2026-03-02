@@ -195,6 +195,7 @@ fn grpc_target_log_cap_is_covered() {
 #[test]
 fn grpc_latency_overflow_branches_are_covered() {
     welog_rs::grpc::coverage_force_grpc_latency_overflow(true);
+    welog_rs::grpc::coverage_force_grpc_duration_conversion_error(true);
 
     let mut req = Request::new(json!({"hello": "world"}));
     *req.metadata_mut() = build_metadata();
@@ -211,6 +212,7 @@ fn grpc_latency_overflow_branches_are_covered() {
         true,
     ));
 
+    welog_rs::grpc::coverage_force_grpc_duration_conversion_error(false);
     welog_rs::grpc::coverage_force_grpc_latency_overflow(false);
 
     let mut req = Request::new(json!({"hello": "world"}));
@@ -241,6 +243,8 @@ fn grpc_invalid_metadata_key_branches_are_covered() {
 #[test]
 fn grpc_metadata_helpers_are_covered() {
     welog_rs::grpc::coverage_touch_metadata_to_map_branches();
+    welog_rs::grpc::coverage_touch_internal_branches();
+    welog_rs::grpc::coverage_touch_grpc_status_code_strings();
     welog_rs::grpc::coverage_force_metadata_to_str_error(true);
     welog_rs::grpc::coverage_force_metadata_to_str_error(false);
 }

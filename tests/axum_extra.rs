@@ -8,6 +8,10 @@ use futures_core::Stream;
 use tower::{Layer, Service, ServiceExt};
 
 use welog_rs::axum_middleware::{WelogContext, WelogLayer};
+#[cfg(coverage)]
+use welog_rs::log_axum_client;
+#[cfg(coverage)]
+use welog_rs::model::{TargetRequest, TargetResponse};
 
 fn block_on<F, T>(future: F) -> T
 where
